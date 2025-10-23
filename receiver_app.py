@@ -1,7 +1,6 @@
 """
 Receiver Application - Works directly with existing GameNetAPI
-Displays data received through gameNetAPI with detailed logs
-Shows: SeqNo, ChannelType, Timestamp, Retransmissions, Packet Arrivals, RTT, etc.
+SERVER MODE - Receives packets from clients
 """
 
 import asyncio
@@ -12,7 +11,8 @@ from typing import Dict, List, Optional
 from collections import defaultdict
 
 # Import YOUR existing GameNetAPI
-from GameNetAPI import GameNetAPI
+from GameNetAPI import GameNetAPI, RELIABLE, UNRELIABLE
+from generate_cert import ensure_certificates  # ← Fixed import name
 
 # Configure detailed logging
 logging.basicConfig(
@@ -29,17 +29,31 @@ class ReceiverApplication:
     Implements all logging requirements from assignment point (g)
     """
     
-    def __init__(self):
+    def __init__(self, host="localhost", port=4433):
         """Initialize receiver application"""
         
-        # Initialize YOUR GameNetAPI
-        self.api = GameNetAPI()
+        self.host = host
+        self.port = port
+        
+        # Ensure certificates exist FIRST
+        print("Checking SSL certificates...")
+        certfile, keyfile = ensure_certificates("cert.pem", "key.pem")
+        print()  # Blank line after cert generation
+        
+        # Initialize YOUR GameNetAPI in SERVER mode WITH certificates
+        self.api = GameNetAPI(
+            isClient=False,  # ← SERVER MODE!
+            host=host,
+            port=port,
+            certfile=certfile,  # ← Pass certificate
+            keyfile=keyfile      # ← Pass private key
+        )
         
         # Statistics tracking
         self.start_time = None
-        self.packet_arrival_times = {}  # {seq_no: arrival_time}
-        self.packet_send_times = {}     # {seq_no: send_time} (from timestamp)
-        self.retransmission_detected = defaultdict(int)  # {seq_no: retx_count}
+        self.packet_arrival_times = {}
+        self.packet_send_times = {}
+        self.retransmission_detected = defaultdict(int)
         self.delivered_packets = []
         self.total_arrivals = 0
         
@@ -61,9 +75,10 @@ class ReceiverApplication:
     def print_header(self):
         """Print formatted header for logs"""
         print("\n" + "="*100)
-        print("🖥️  RECEIVER APPLICATION - H-QUIC Protocol")
+        print("🖥️  RECEIVER APPLICATION - H-QUIC Protocol (SERVER MODE)")
         print("="*100)
         print(f"Started:        {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Listening on:   {self.host}:{self.port}")
         print("="*100)
         print("\nLog Format:")
         print("  [ARRIVAL]  - Packet arrives from network")
@@ -72,37 +87,51 @@ class ReceiverApplication:
         print("  [APP-DATA] - Application displays packet data")
         print("="*100 + "\n")
     
-    def on_packet_received(self, packet_data, reliable, seq_no=None, timestamp=None):
-        """
-        Callback/handler when packet is received
-        Adjust parameter extraction based on YOUR packet structure
+    async def start(self):
+        """Start the receiver application"""
+        self.start_time = time.time()
+        self.running = True
         
-        Args:
-            packet_data: Could be dict, object, or raw data
-            reliable: Boolean indicating channel type
-            seq_no: Sequence number (if available)
-            timestamp: Send timestamp (if available)
+        logger.info("🚀 Starting receiver server...\n")
+        
+        # Start server (NOT connect!)
+        await self.api.start()  # ← This starts the SERVER
+        
+        logger.info("✅ Receiver server started - Listening for packets...\n")
+    
+    async def receive_loop(self):
+        """
+        Main receive loop - receives packets from clients
+        """
+        try:
+            while self.running:
+                # Receive packet from YOUR GameNetAPI
+                packet_dict, reliable = await self.api.receive()
+                
+                # Extract fields
+                seq_no = packet_dict['seq_no']
+                timestamp = packet_dict['timestamp'] / 1000.0  # Convert ms to seconds
+                payload = packet_dict['payload']
+                
+                # Process the packet
+                self.on_packet_received(
+                    packet_data=payload,
+                    reliable=reliable,
+                    seq_no=seq_no,
+                    timestamp=timestamp
+                )
+                    
+        except KeyboardInterrupt:
+            logger.info("\n⚠️  Interrupted by user (Ctrl+C)")
+        except Exception as e:
+            logger.error(f"❌ Error in receive loop: {e}", exc_info=True)
+    
+    def on_packet_received(self, packet_data, reliable, seq_no, timestamp):
+        """
+        Handler when packet is received
         """
         self.total_arrivals += 1
         arrival_time = time.time()
-        
-        # Extract packet fields based on YOUR structure
-        # Adjust this section based on how your packets are structured
-        if isinstance(packet_data, dict):
-            # If packet is a dictionary
-            seq_no = seq_no or packet_data.get('seq_no', self.total_arrivals)
-            timestamp = timestamp or packet_data.get('timestamp', arrival_time)
-            payload = packet_data
-        elif hasattr(packet_data, '__dict__'):
-            # If packet is an object
-            seq_no = seq_no or getattr(packet_data, 'seq_no', self.total_arrivals)
-            timestamp = timestamp or getattr(packet_data, 'timestamp', arrival_time)
-            payload = packet_data
-        else:
-            # Fallback
-            seq_no = seq_no or self.total_arrivals
-            timestamp = timestamp or arrival_time
-            payload = packet_data
         
         # Store arrival time
         self.packet_arrival_times[seq_no] = arrival_time
@@ -118,7 +147,7 @@ class ReceiverApplication:
         
         # Detect retransmission (if RTT is abnormally high)
         expected_rtt = 50  # Base network delay
-        if rtt_ms > expected_rtt * 3:  # 3x threshold suggests retransmission
+        if rtt_ms > expected_rtt * 3:
             self.retransmission_detected[seq_no] += 1
             retx_indicator = f"[RETRANS×{self.retransmission_detected[seq_no]}]"
         else:
@@ -141,8 +170,8 @@ class ReceiverApplication:
             f"RTT={rtt_ms:7.2f}ms {retx_indicator}{out_of_order_indicator}"
         )
         
-        # Deliver packet (in your implementation, GameNetAPI handles reordering)
-        self.on_packet_delivered(payload, reliable, seq_no, timestamp, rtt_ms)
+        # Deliver packet
+        self.on_packet_delivered(packet_data, reliable, seq_no, timestamp, rtt_ms)
     
     def on_packet_delivered(self, packet_data, reliable, seq_no, timestamp, rtt_ms):
         """
@@ -204,84 +233,6 @@ class ReceiverApplication:
         # Print separator every 10 packets for readability
         if seq_no > 0 and seq_no % 10 == 0:
             logger.info("  " + "-"*95)
-    
-    async def start(self):
-        """Start the receiver application"""
-        self.start_time = time.time()
-        self.running = True
-        
-        logger.info("🚀 Starting receiver...\n")
-        
-        # Connect using YOUR GameNetAPI
-        await self.api.connect()
-        
-        logger.info("✅ Receiver connected - Listening for packets...\n")
-    
-    async def receive_loop(self):
-        """
-        Main receive loop
-        Adapt this based on how YOUR GameNetAPI receives packets
-        """
-        try:
-            while self.running:
-                # OPTION 1: If your API has a receive() method
-                if hasattr(self.api, 'receive'):
-                    try:
-                        packet = await self.api.receive()
-                        if packet:
-                            # Extract packet info based on YOUR structure
-                            # Adjust these based on your packet format
-                            if isinstance(packet, dict):
-                                data = packet.get('data') or packet.get('payload') or packet
-                                reliable = packet.get('reliable', True)
-                                seq_no = packet.get('seq_no')
-                                timestamp = packet.get('timestamp')
-                            elif hasattr(packet, 'data'):
-                                data = packet.data
-                                reliable = getattr(packet, 'reliable', True)
-                                seq_no = getattr(packet, 'seq_no', None)
-                                timestamp = getattr(packet, 'timestamp', None)
-                            else:
-                                data = packet
-                                reliable = True
-                                seq_no = None
-                                timestamp = None
-                            
-                            self.on_packet_received(data, reliable, seq_no, timestamp)
-                    except asyncio.TimeoutError:
-                        await asyncio.sleep(0.01)
-                
-                # OPTION 2: If your API has a get_packet() method
-                elif hasattr(self.api, 'get_packet'):
-                    packet = self.api.get_packet()
-                    if packet:
-                        # Process packet (same extraction as above)
-                        self.on_packet_received(packet, True)  # Adjust parameters
-                    else:
-                        await asyncio.sleep(0.01)
-                
-                # OPTION 3: If your API uses callbacks (do nothing, callback handles it)
-                elif hasattr(self.api, 'on_receive') or hasattr(self.api, 'set_receive_callback'):
-                    # Just wait, callbacks handle reception
-                    await asyncio.sleep(0.1)
-                
-                # OPTION 4: If your API has internal queue
-                elif hasattr(self.api, 'packet_queue'):
-                    if not self.api.packet_queue.empty():
-                        packet = await self.api.packet_queue.get()
-                        self.on_packet_received(packet, True)  # Adjust parameters
-                    else:
-                        await asyncio.sleep(0.01)
-                
-                else:
-                    # Default: just wait
-                    logger.warning("⚠️  No receive method found in GameNetAPI. Waiting...")
-                    await asyncio.sleep(1)
-                    
-        except KeyboardInterrupt:
-            logger.info("\n⚠️  Interrupted by user (Ctrl+C)")
-        except Exception as e:
-            logger.error(f"❌ Error in receive loop: {e}", exc_info=True)
     
     async def stop(self):
         """Stop the receiver and print final statistics"""
@@ -370,7 +321,7 @@ class ReceiverApplication:
 
 async def main():
     """Main entry point"""
-    receiver = ReceiverApplication()
+    receiver = ReceiverApplication(host="localhost", port=4433)
     
     try:
         await receiver.start()
