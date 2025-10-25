@@ -23,8 +23,6 @@ class GameServerProtocol(QuicConnectionProtocol):
         self.expected_seq = 0  # next expected reliable seq
         self.on_message = None
 
-    # NOTE: aioquic expects quic_event_received to be a synchronous method.
-    # Use asyncio.create_task to schedule async work.
     def quic_event_received(self, event):
         if isinstance(event, StreamDataReceived):
             # schedule async handler

@@ -28,12 +28,10 @@ class GameNetAPI:
         self.seq = {RELIABLE: 0, UNRELIABLE: 0}
         self.connected = False
         if not isClient:
-            # load the certificate and private key you just generated
             self.config.load_cert_chain(certfile="cert.pem", keyfile="key.pem")
         if hasattr(self.config, "max_datagram_frame_size"):
             self.config.max_datagram_frame_size = 65536
         else:
-            # older/newer aioquic variants: try attribute name used by your installed version
             try:
                 self.config.datagram_frame_size = 65536
             except Exception:
