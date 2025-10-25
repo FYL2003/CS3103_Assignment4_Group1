@@ -6,7 +6,7 @@ This server receives packets from game clients using the H-QUIC protocol,
 tracks performance metrics, and displays comprehensive statistics.
 
 Requirements satisfied:
-- Point (g): Logs SeqNo, ChannelType, Timestamp, RTT, retransmissions, packet arrivals
+- Point (g): Logs SeqNo, ChannelType, Timestamp, RTT, packet arrivals
 - Point (i): Measures latency, jitter, throughput, and packet delivery ratio
 """
 
@@ -43,7 +43,6 @@ class PacketInfo:
     delivery_time: float  # When delivered to application
     rtt_ms: float
     payload: dict
-    retransmission_count: int = 0
     out_of_order: bool = False
 
 
@@ -117,7 +116,6 @@ class ReceiverApplication:
     
     Features:
     - Separate handling for RELIABLE and UNRELIABLE channels
-    - Retransmission detection
     - Out-of-order packet detection
     - Real-time metrics calculation
     - Comprehensive statistics reporting
@@ -160,7 +158,6 @@ class ReceiverApplication:
         
         # Packet tracking
         self.delivered_packets: List[PacketInfo] = []
-        self.retransmission_detected = defaultdict(int)
         self.packet_arrival_times: Dict[int, float] = {}
         self.packet_send_times: Dict[int, float] = {}
         
@@ -170,10 +167,6 @@ class ReceiverApplication:
         
         # Control flags
         self.running: bool = False
-        
-        # Expected RTT threshold for retransmission detection
-        self.expected_rtt_ms: float = 50.0  # Base network delay
-        self.retransmission_threshold_multiplier: float = 3.0
         
         # Display configuration
         self.log_separator_interval: int = 10  # Print separator every N packets
@@ -194,7 +187,6 @@ class ReceiverApplication:
         print("\nLog Format:")
         print("  [ARRIVAL]  - Packet arrives from network")
         print("  [DELIVER]  - Packet delivered to application (after reordering)")
-        print("  [RETRANS]  - Retransmission detected (RTT > threshold)")
         print("  [OUT-ORDER] - Packet received out of order")
         print("  [APP-DATA] - Application displays packet payload")
         print("="*100 + "\n")
@@ -284,14 +276,6 @@ class ReceiverApplication:
         payload_bytes = len(json.dumps(payload).encode())
         metrics.bytes_received += payload_bytes
         
-        # Detect retransmission (abnormally high RTT)
-        retransmission_threshold = self.expected_rtt_ms * self.retransmission_threshold_multiplier
-        is_retransmission = rtt_ms > retransmission_threshold
-        if is_retransmission:
-            self.retransmission_detected[seq_no] += 1
-        
-        retrans_count = self.retransmission_detected.get(seq_no, 0)
-        
         # Detect out-of-order delivery
         out_of_order = (seq_no <= metrics.last_seq and metrics.last_seq >= 0)
         if not out_of_order:
@@ -303,7 +287,6 @@ class ReceiverApplication:
             channel=channel,
             timestamp=timestamp,
             rtt_ms=rtt_ms,
-            retrans_count=retrans_count,
             out_of_order=out_of_order
         )
         
@@ -315,22 +298,19 @@ class ReceiverApplication:
             arrival_time=arrival_time,
             rtt_ms=rtt_ms,
             payload=payload,
-            retrans_count=retrans_count,
             out_of_order=out_of_order
         )
     
     def log_packet_arrival(self, seq_no: int, channel: str, timestamp: float,
-                          rtt_ms: float, retrans_count: int, out_of_order: bool):
+                          rtt_ms: float, out_of_order: bool):
         """
         Log packet arrival with detailed information
         
         Satisfies assignment requirement (g): Print logs showing SeqNo, 
-        ChannelType, Timestamp, retransmissions, packet arrivals, and RTT
+        ChannelType, Timestamp, packet arrivals, and RTT
         """
         # Build status indicators
         indicators = []
-        if retrans_count > 0:
-            indicators.append(f"[RETRANS×{retrans_count}]")
         if out_of_order:
             indicators.append("[OUT-OF-ORDER]")
         
@@ -351,7 +331,7 @@ class ReceiverApplication:
     
     async def deliver_packet(self, seq_no: int, channel: str, timestamp: float,
                             arrival_time: float, rtt_ms: float, payload: dict,
-                            retrans_count: int, out_of_order: bool):
+                            out_of_order: bool):
         """
         Deliver packet to application layer
         
@@ -377,7 +357,6 @@ class ReceiverApplication:
             delivery_time=delivery_time,
             rtt_ms=rtt_ms,
             payload=payload,
-            retransmission_count=retrans_count,
             out_of_order=out_of_order
         )
         self.delivered_packets.append(packet_info)
@@ -389,7 +368,6 @@ class ReceiverApplication:
             rtt_ms=rtt_ms,
             buffering_delay_ms=buffering_delay_ms,
             total_delay_ms=total_delay_ms,
-            retrans_count=retrans_count
         )
         
         # Display application data
@@ -401,10 +379,9 @@ class ReceiverApplication:
     
     def log_packet_delivery(self, seq_no: int, channel: str, rtt_ms: float,
                            buffering_delay_ms: float, total_delay_ms: float,
-                           retrans_count: int):
+                           ):
         """Log packet delivery to application"""
         channel_str = "REL" if channel == "RELIABLE" else "UNR"
-        retrans_str = f"Retrans={retrans_count}" if retrans_count > 0 else "Retrans=0"
         
         logger.info(
             f"[DELIVER]  "
@@ -413,7 +390,6 @@ class ReceiverApplication:
             f"RTT={rtt_ms:7.2f}ms | "
             f"BuffDelay={buffering_delay_ms:6.2f}ms | "
             f"TotalDelay={total_delay_ms:7.2f}ms | "
-            f"{retrans_str}"
         )
     
     def display_packet_data(self, seq_no: int, channel: str, payload: dict):
@@ -517,23 +493,6 @@ class ReceiverApplication:
                 pdr = (metrics.packets_received / self.total_arrivals * 100) if self.total_arrivals > 0 else 0
                 print(f"\n    Packet Delivery Ratio:")
                 print(f"      PDR:                    {pdr:.2f}%")
-        
-        # Retransmission statistics
-        total_retransmissions = sum(self.retransmission_detected.values())
-        print(f"\n{'RETRANSMISSION STATISTICS':^100}")
-        print("-"*100)
-        print(f"  Total Retransmissions:      {total_retransmissions}")
-        print(f"  Packets with Retrans:       {len(self.retransmission_detected)}")
-        
-        if self.retransmission_detected:
-            retrans_list = sorted(
-                self.retransmission_detected.items(),
-                key=lambda x: x[1],
-                reverse=True
-            )[:5]
-            print(f"  Most Retransmitted (top 5):")
-            for seq, count in retrans_list:
-                print(f"    SeqNo {seq:4d}:              {count} retransmissions")
         
         # Out-of-order statistics
         out_of_order_count = sum(1 for p in self.delivered_packets if p.out_of_order)
