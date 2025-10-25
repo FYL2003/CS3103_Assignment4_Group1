@@ -40,7 +40,7 @@ class ReceiverApplication:
         certfile, keyfile = ensure_certificates("cert.pem", "key.pem")
         print()  # Blank line after cert generation
         
-        # Initialize YOUR GameNetAPI in SERVER mode WITH certificates
+        # Initialize  GameNetAPI in SERVER mode WITH certificates
         self.api = GameNetAPI(
             isClient=False,  # ← SERVER MODE!
             host=host,
@@ -94,8 +94,8 @@ class ReceiverApplication:
         
         logger.info("🚀 Starting receiver server...\n")
         
-        # Start server (NOT connect!)
-        await self.api.start()  # ← This starts the SERVER
+        # Start server
+        await self.api.start()
         
         logger.info("✅ Receiver server started - Listening for packets...\n")
     
