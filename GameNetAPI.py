@@ -1,11 +1,18 @@
 import asyncio
 import json
 import time
-from aioquic.asyncio import connect
+
+from aioquic.asyncio import connect, serve
 from aioquic.quic.configuration import QuicConfiguration
+
+from GameServerProtocol import GameServerProtocol
 
 RELIABLE = 1
 UNRELIABLE = 0
+
+RETRANSMISSION_TIMEOUT = 0.2  # 200 ms default
+TIMESTAMP_BYTES = 8
+
 
 class GameNetAPI:
     def __init__(self, isClient=True, host="localhost", port=4433):
@@ -14,10 +21,23 @@ class GameNetAPI:
         self.port = port
         self.conn = None
         self._connect_ctx = None
-        self.config = QuicConfiguration(is_client=isClient, alpn_protocols=["GameNetAPI"])
+        self.config = QuicConfiguration(
+            is_client=isClient, alpn_protocols=["GameNetAPI"]
+        )
         self.config.verify_mode = False
         self.seq = {RELIABLE: 0, UNRELIABLE: 0}
         self.connected = False
+        if not isClient:
+            # load the certificate and private key you just generated
+            self.config.load_cert_chain(certfile="cert.pem", keyfile="key.pem")
+        if hasattr(self.config, "max_datagram_frame_size"):
+            self.config.max_datagram_frame_size = 65536
+        else:
+            # older/newer aioquic variants: try attribute name used by your installed version
+            try:
+                self.config.datagram_frame_size = 65536
+            except Exception:
+                pass
 
     async def connect(self):
         if not self.is_client:
@@ -39,9 +59,9 @@ class GameNetAPI:
 
         payload = json.dumps(data)
         header = (
-            channel.to_bytes(1, "big") +
-            seq_no.to_bytes(2, "big") +
-            timestamp.to_bytes(8, "big")
+            channel.to_bytes(1, "big")
+            + seq_no.to_bytes(2, "big")
+            + timestamp.to_bytes(8, "big")
         )
         packet = header + payload.encode()
 
@@ -64,4 +84,17 @@ class GameNetAPI:
         print("Closing QUIC connection...")
         await self._connect_ctx.__aexit__(None, None, None)
         self.connected = False
-        print("✅ Connection closed")
+        print("Connection closed")
+
+    async def start_server(self):
+        if self.is_client:
+            raise RuntimeError("Server mode requires isClient=False")
+        print(f"Starting QUIC server on {self.host}:{self.port} ...")
+        await serve(
+            host=self.host,
+            port=self.port,
+            configuration=self.config,
+            create_protocol=GameServerProtocol,
+        )
+        print("Server running")
+        await asyncio.Event().wait()
