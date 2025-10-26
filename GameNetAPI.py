@@ -84,7 +84,7 @@ class GameNetAPI:
         self.connected = False
         print("Connection closed")
 
-    async def start_server(self):
+    async def start(self):
         if self.is_client:
             raise RuntimeError("Server mode requires isClient=False")
         print(f"Starting QUIC server on {self.host}:{self.port} ...")
