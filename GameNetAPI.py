@@ -15,7 +15,7 @@ TIMESTAMP_BYTES = 8
 
 
 class GameNetAPI:
-    def __init__(self, isClient=True, host="localhost", port=4433):
+    def __init__(self, isClient=True, host="localhost", port=4433, certfile=None, keyfile=None):
         self.is_client = isClient
         self.host = host
         self.port = port
@@ -28,7 +28,7 @@ class GameNetAPI:
         self.seq = {RELIABLE: 0, UNRELIABLE: 0}
         self.connected = False
         if not isClient:
-            self.config.load_cert_chain(certfile="cert.pem", keyfile="key.pem")
+            self.config.load_cert_chain(certfile=certfile, keyfile=keyfile)
         if hasattr(self.config, "max_datagram_frame_size"):
             self.config.max_datagram_frame_size = 65536
         else:
