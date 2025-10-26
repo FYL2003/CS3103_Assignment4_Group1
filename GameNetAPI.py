@@ -15,7 +15,9 @@ TIMESTAMP_BYTES = 8
 
 
 class GameNetAPI:
-    def __init__(self, isClient=True, host="localhost", port=4433, certfile=None, keyfile=None):
+    def __init__(
+        self, isClient=True, host="localhost", port=4433, certfile=None, keyfile=None
+    ):
         self.is_client = isClient
         self.host = host
         self.port = port
@@ -27,8 +29,10 @@ class GameNetAPI:
         self.config.verify_mode = False
         self.seq = {RELIABLE: 0, UNRELIABLE: 0}
         self.connected = False
+        self.on_message = None  # callback for received messages
         if not isClient:
             self.config.load_cert_chain(certfile=certfile, keyfile=keyfile)
+        # enable datagram support
         if hasattr(self.config, "max_datagram_frame_size"):
             self.config.max_datagram_frame_size = 65536
         else:
@@ -45,7 +49,7 @@ class GameNetAPI:
         self._connect_ctx = connect(self.host, self.port, configuration=self.config)
         self.conn = await self._connect_ctx.__aenter__()
         self.connected = True
-        print("✅ Connected to QUIC server")
+        print("Connected to QUIC server")
 
     async def send(self, data: dict, reliable: bool = True):
         if not self.connected:
@@ -84,15 +88,29 @@ class GameNetAPI:
         self.connected = False
         print("Connection closed")
 
-    async def start(self):
+    def set_message_callback(self, callback):
+        """Set callback for received messages.
+
+        callback should be an async function taking (data: dict, reliable: bool)
+        """
+        self.on_message = callback
+
+    async def start_server(self):
+        """Start the QUIC server and wait for connections"""
         if self.is_client:
             raise RuntimeError("Server mode requires isClient=False")
+
         print(f"Starting QUIC server on {self.host}:{self.port} ...")
+
+        # Create protocol with our message callback
         await serve(
             host=self.host,
             port=self.port,
             configuration=self.config,
-            create_protocol=GameServerProtocol,
+            create_protocol=lambda *args, **kwargs: GameServerProtocol(
+                *args, on_message=self.on_message, **kwargs
+            ),
         )
+
         print("Server running")
         await asyncio.Event().wait()

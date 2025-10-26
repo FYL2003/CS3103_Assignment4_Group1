@@ -17,11 +17,11 @@ TIMESTAMP_BYTES = 8
 
 
 class GameServerProtocol(QuicConnectionProtocol):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, on_message=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.reliable_buffer = {}  # seq_no -> packet
         self.expected_seq = 0  # next expected reliable seq
-        self.on_message = None
+        self.on_message = on_message  # callback for received messages
 
     def quic_event_received(self, event):
         if isinstance(event, StreamDataReceived):
@@ -78,10 +78,29 @@ class GameServerProtocol(QuicConnectionProtocol):
             self.expected_seq += 1
 
     async def _deliver_packet(self, data, reliable, seq_no, timestamp):
+        """Deliver packet to application callback
+
+        Formats the data as expected by ReceiverApplication:
+        {
+            'seq_no': int,
+            'timestamp': float (in ms),
+            'payload': dict (original data)
+        }
+        """
         rtt = int(time.time() * 1000) - timestamp
         print(
             f"{'[RELIABLE]' if reliable else '[UNRELIABLE]'} "
             f"Seq {seq_no} | Timestamp {timestamp} | RTT {rtt} ms | Data: {data}"
         )
+
         if self.on_message:
-            await self.on_message(data, reliable)
+            # Format data as expected by ReceiverApplication
+            formatted_data = {
+                "seq_no": seq_no,
+                "timestamp": timestamp,  # Original timestamp from sender
+                "payload": data,  # Original data payload
+            }
+            try:
+                await self.on_message(formatted_data, reliable)
+            except Exception as e:
+                print(f"Error in message callback: {e}")
