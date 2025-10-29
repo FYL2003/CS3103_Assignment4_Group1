@@ -76,6 +76,19 @@ class ChannelMetrics:
         self.received_seqs.clear()
         self.rtts.clear()
         self.jitter_samples.clear()
+    
+    def reset_metrics(self):
+        """Reset all metrics to initial state - called after statistics are displayed"""
+        self.packets_received = 0
+        self.packets_delivered = 0
+        self.bytes_received = 0
+        self.rtts.clear()
+        self.jitter_samples.clear()
+        self.last_rtt = None
+        self.start_time = None
+        self.last_seq = -1
+        self.highest_seq = -1
+        self.received_seqs.clear()
 
     @property
     def avg_rtt(self) -> float:
@@ -414,6 +427,17 @@ class GameNetAPI:
         print(f"  In-Order Packets:           {delivered_packets_count - out_of_order_count}")
 
         print("=" * 100)
+        
+        # Reset metrics after displaying statistics to prepare for next connection
+        self.reset_all_metrics()
+    
+    def reset_all_metrics(self):
+        """Reset all metrics across all channels - called after statistics display"""
+        if not self.is_client and hasattr(self, 'metrics'):
+            for channel_metrics in self.metrics.values():
+                channel_metrics.reset_metrics()
+            self.start_time = None
+            self.total_arrivals = 0
 
     async def close(self):
         if not self.connected:

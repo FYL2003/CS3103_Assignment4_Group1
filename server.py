@@ -186,6 +186,11 @@ class ReceiverApplication:
             delivered_packets_count=len(self.delivered_packets),
             out_of_order_count=out_of_order_count
         )
+        
+        # Clear delivered packets list for next connection
+        self.delivered_packets.clear()
+        self.packet_arrival_times.clear()
+        self.packet_send_times.clear()
 
         logger.info("")
         logger.info("=" * 100)
