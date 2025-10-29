@@ -149,7 +149,6 @@ class ReceiverApplication:
 
         # Track metrics using API
         metrics_data = self.api.track_packet_metrics(seq_no, timestamp, payload, reliable)
-        
         # Store timing information for application use
         self.packet_arrival_times[seq_no] = metrics_data["arrival_time"]
         self.packet_send_times[seq_no] = timestamp
