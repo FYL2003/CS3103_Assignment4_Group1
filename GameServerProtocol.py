@@ -20,6 +20,16 @@ logger = logging.getLogger(__name__)
 
 
 class GameServerProtocol(QuicConnectionProtocol):
+    """
+    QUIC protocol handler for game server
+    
+    Callback Behavior:
+    - on_message: Called for each received packet (runs in event loop)
+    - on_connection_terminated: Called when connection ends (runs asynchronously)
+      Note: Callback runs as a background task and does not block protocol termination.
+      Callbacks should complete quickly or handle their own async operations.
+      Any exceptions are logged but do not affect protocol shutdown.
+    """
     def __init__(self, *args, on_message=None, on_connection_terminated=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.reliable_buffer = {}  # seq_no -> packet

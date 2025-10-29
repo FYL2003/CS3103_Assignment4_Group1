@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import List, Optional, Set
 
@@ -16,6 +17,11 @@ UNRELIABLE = 0
 RETRANSMISSION_TIMEOUT = 0.2  # 200 ms default
 TIMESTAMP_BYTES = 8
 
+# Constants for bounded buffer sizes
+MAX_RTT_SAMPLES = 10000  # Keep last 10k RTT samples for statistics
+MAX_JITTER_SAMPLES = 10000  # Keep last 10k jitter samples
+MAX_SEQUENCE_TRACKING = 100000  # Track up to 100k sequence numbers before cleanup
+
 
 # -------------------- Metrics Classes --------------------
 @dataclass
@@ -23,18 +29,19 @@ class ChannelMetrics:
     """
     Metrics for a single channel (reliable or unreliable)
     
-    Memory Considerations:
-    - received_seqs set grows unbounded with each unique sequence number
-    - For long-running sessions, this can lead to significant memory usage
-    - Consider implementing cleanup strategies for production deployments
-      (e.g., sliding window, periodic reset, or capacity limits)
+    Memory Management:
+    - rtts and jitter_samples use bounded deques (10k samples each)
+    - received_seqs set has a soft limit of 100k sequence numbers
+    - When limit is reached, a warning is logged and set is cleared
+    - For assignment testing (typically < 1 minute), buffers are more than sufficient
+    - Cleanup occurs automatically on connection termination
     """
 
     packets_received: int = 0
     packets_delivered: int = 0
     bytes_received: int = 0
-    rtts: List[float] = field(default_factory=list)
-    jitter_samples: List[float] = field(default_factory=list)
+    rtts: deque = field(default_factory=lambda: deque(maxlen=MAX_RTT_SAMPLES))
+    jitter_samples: deque = field(default_factory=lambda: deque(maxlen=MAX_JITTER_SAMPLES))
     last_rtt: Optional[float] = None
     start_time: Optional[float] = None
     last_seq: int = -1
@@ -50,6 +57,25 @@ class ChannelMetrics:
             self.jitter_samples.append(jitter)
 
         self.last_rtt = rtt_ms
+    
+    def check_and_cleanup_seqs(self):
+        """Check if sequence tracking set is too large and cleanup if needed"""
+        if len(self.received_seqs) > MAX_SEQUENCE_TRACKING:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                f"Sequence tracking exceeded {MAX_SEQUENCE_TRACKING} entries. "
+                "Clearing for memory management. PDR calculation may be affected."
+            )
+            self.received_seqs.clear()
+            # Reset tracking variables
+            self.highest_seq = -1
+    
+    def clear_buffers(self):
+        """Clear all buffers - called on connection termination"""
+        self.received_seqs.clear()
+        self.rtts.clear()
+        self.jitter_samples.clear()
 
     @property
     def avg_rtt(self) -> float:
@@ -194,6 +220,9 @@ class GameNetAPI:
         metrics.received_seqs.add(seq_no)
         if seq_no > metrics.highest_seq:
             metrics.highest_seq = seq_no
+        
+        # Check if we need to cleanup sequence tracking to prevent unbounded growth
+        metrics.check_and_cleanup_seqs()
         
         payload_bytes = len(json.dumps(payload).encode())
         metrics.bytes_received += payload_bytes
@@ -390,6 +419,12 @@ class GameNetAPI:
         if not self.connected:
             return
         print("Closing QUIC connection...")
+        
+        # Clear buffers to free memory
+        if not self.is_client and hasattr(self, 'metrics'):
+            for channel_metrics in self.metrics.values():
+                channel_metrics.clear_buffers()
+        
         await self._connect_ctx.__aexit__(None, None, None)
         self.connected = False
         print("Connection closed")
