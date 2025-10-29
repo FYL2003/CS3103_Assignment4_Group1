@@ -152,6 +152,64 @@ class GameNetAPI:
         """Ensure SSL certificates exist, generate if needed"""
         return ensure_certificates(certfile, keyfile)
 
+    def track_packet_metrics(self, seq_no: int, timestamp: float, payload: dict, reliable: bool) -> dict:
+        """
+        Track metrics for a received packet (server mode only)
+        
+        Args:
+            seq_no: Packet sequence number
+            timestamp: Original send timestamp (seconds)
+            payload: Packet payload data
+            reliable: True if RELIABLE channel, False if UNRELIABLE
+            
+        Returns:
+            Dictionary with calculated metrics:
+            - arrival_time: When packet arrived
+            - rtt_ms: Round-trip time in milliseconds
+            - out_of_order: Whether packet was out of order
+            - channel: "RELIABLE" or "UNRELIABLE"
+        """
+        if self.is_client:
+            raise RuntimeError("track_packet_metrics() should only be used in server mode")
+        
+        arrival_time = time.time()
+        self.total_arrivals += 1
+        
+        # Determine channel
+        channel = "RELIABLE" if reliable else "UNRELIABLE"
+        metrics = self.metrics[channel]
+        
+        # Initialize channel start time
+        if metrics.start_time is None:
+            metrics.start_time = arrival_time
+        
+        # Calculate RTT (one-way latency approximation)
+        rtt_ms = (arrival_time - timestamp) * 1000
+        
+        # Add RTT to metrics (also calculates jitter)
+        metrics.add_rtt(rtt_ms)
+        
+        # Update receive counters and track sequence numbers
+        metrics.packets_received += 1
+        metrics.received_seqs.add(seq_no)
+        if seq_no > metrics.highest_seq:
+            metrics.highest_seq = seq_no
+        
+        payload_bytes = len(json.dumps(payload).encode())
+        metrics.bytes_received += payload_bytes
+        
+        # Detect out-of-order delivery
+        out_of_order = seq_no <= metrics.last_seq and metrics.last_seq >= 0
+        if not out_of_order:
+            metrics.last_seq = seq_no
+        
+        return {
+            "arrival_time": arrival_time,
+            "rtt_ms": rtt_ms,
+            "out_of_order": out_of_order,
+            "channel": channel
+        }
+
     async def connect(self):
         if not self.is_client:
             raise RuntimeError("connect() should only be used in client mode")
