@@ -253,7 +253,8 @@ class GameNetAPI:
         """
         stats = self.get_statistics_summary(delivered_packets_count)
         runtime = stats["runtime"]
-        
+
+        print("")
         print("=" * 100)
         print("H-QUIC RECEIVER STATISTICS")
         print("=" * 100)

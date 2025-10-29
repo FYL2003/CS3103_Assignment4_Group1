@@ -205,9 +205,10 @@ class ReceiverApplication:
 
     async def on_connection_terminated(self):
         """Callback when client connection is terminated - display statistics"""
-        logger.info("\n" + "=" * 100)
+        logger.info("")
+        logger.info("=" * 100)
         logger.info("CLIENT CONNECTION TERMINATED")
-        logger.info("=" * 100 + "\n")
+        logger.info("=" * 100)
 
         # Display statistics
         out_of_order_count = sum(1 for p in self.delivered_packets if p.out_of_order)
@@ -215,11 +216,12 @@ class ReceiverApplication:
             delivered_packets_count=len(self.delivered_packets),
             out_of_order_count=out_of_order_count
         )
-        
-        logger.info("\n" + "=" * 100)
+
+        logger.info("")
+        logger.info("=" * 100)
         logger.info("Server continues running - waiting for new connections...")
         logger.info("Press Ctrl+C to stop the server")
-        logger.info("=" * 100 + "\n")
+        logger.info("=" * 100)
 
     async def receive_loop(self):
         """

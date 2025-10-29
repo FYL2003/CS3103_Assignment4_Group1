@@ -5,7 +5,7 @@ Used by both client and server
 """
 
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 
 def generate_self_signed_cert(certfile="cert.pem", keyfile="key.pem", force=False):
@@ -70,11 +70,11 @@ def generate_self_signed_cert(certfile="cert.pem", keyfile="key.pem", force=Fals
             private_key.public_key()
         ).serial_number(
             x509.random_serial_number()
-        ).not_valid_before(
-            datetime.utcnow()
-        ).not_valid_after(
+        ).not_valid_before_utc(
+            datetime.now(timezone.utc)
+        ).not_valid_after_utc(
             # Valid for 365 days
-            datetime.utcnow() + timedelta(days=365)
+            datetime.now(timezone.utc) + timedelta(days=365)
         ).add_extension(
             # Add Subject Alternative Names for localhost
             x509.SubjectAlternativeName([
@@ -108,8 +108,8 @@ def generate_self_signed_cert(certfile="cert.pem", keyfile="key.pem", force=Fals
         print(f"✅ Successfully generated certificates!")
         print(f"   Certificate: {certfile}")
         print(f"   Private Key: {keyfile}")
-        print(f"   Valid from:  {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
-        print(f"   Valid until: {(datetime.utcnow() + timedelta(days=365)).strftime('%Y-%m-%d %H:%M:%S')} UTC")
+        print(f"   Valid from:  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
+        print(f"   Valid until: {(datetime.now(timezone.utc) + timedelta(days=365)).strftime('%Y-%m-%d %H:%M:%S')} UTC")
         
         return certfile, keyfile
         
@@ -145,8 +145,8 @@ def check_cert_expiry(certfile, warn_days=30):
         with open(certfile, "rb") as f:
             cert = x509.load_pem_x509_certificate(f.read(), default_backend())
         
-        expiry = cert.not_valid_after
-        days_until_expiry = (expiry - datetime.utcnow()).days
+        expiry = cert.not_valid_after_utc
+        days_until_expiry = (expiry - datetime.now(timezone.utc)).days
         
         if days_until_expiry < 0:
             print(f"⚠️  WARNING: Certificate expired {abs(days_until_expiry)} days ago!")
