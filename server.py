@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import time
+import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -106,7 +107,7 @@ class ReceiverApplication:
 
         # Set up message callback
         self.api.set_message_callback(self.on_message)
-        
+
         # Set up connection termination callback
         self.api.set_connection_terminated_callback(self.on_connection_terminated)
 
@@ -173,7 +174,7 @@ class ReceiverApplication:
         metrics.received_seqs.add(seq_no)
         if seq_no > metrics.highest_seq:
             metrics.highest_seq = seq_no
-        
+
         payload_bytes = len(json.dumps(payload).encode())
         metrics.bytes_received += payload_bytes
 
@@ -207,7 +208,7 @@ class ReceiverApplication:
         logger.info("\n" + "=" * 100)
         logger.info("CLIENT CONNECTION TERMINATED")
         logger.info("=" * 100 + "\n")
-        
+
         # Display statistics
         out_of_order_count = sum(1 for p in self.delivered_packets if p.out_of_order)
         self.api.print_statistics(
@@ -466,6 +467,12 @@ class ReceiverApplication:
         This method is kept for backward compatibility but now delegates
         to the API's print_statistics method.
         """
+        warnings.warn(
+            "ReceiverApplication.print_statistics() is deprecated. "
+            "Use GameNetAPI.print_statistics() instead.",
+            DeprecationWarning,
+            stacklevel=2
+        )
         out_of_order_count = sum(1 for p in self.delivered_packets if p.out_of_order)
         self.api.print_statistics(
             delivered_packets_count=len(self.delivered_packets),

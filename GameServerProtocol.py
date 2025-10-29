@@ -24,6 +24,13 @@ class GameServerProtocol(QuicConnectionProtocol):
         self.on_message = on_message  # callback for received messages
         self.on_connection_terminated = on_connection_terminated  # callback for connection termination
 
+    def _handle_callback_error(self, task):
+        """Handle exceptions from connection termination callback"""
+        try:
+            task.result()
+        except Exception as e:
+            print(f"Error in connection termination callback: {e}")
+
     def quic_event_received(self, event):
         if isinstance(event, StreamDataReceived):
             # schedule async handler
@@ -41,7 +48,9 @@ class GameServerProtocol(QuicConnectionProtocol):
         elif isinstance(event, ConnectionTerminated):
             print("Connection terminated by client")
             if self.on_connection_terminated:
-                asyncio.create_task(self.on_connection_terminated())
+                task = asyncio.create_task(self.on_connection_terminated())
+                # Add error handler to prevent silent failures
+                task.add_done_callback(self._handle_callback_error)
 
     async def _handle_packet(self, packet: bytes, reliable: bool):
         # header: 1 byte channel | 2 bytes seq_no | 8 bytes timestamp

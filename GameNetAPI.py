@@ -2,7 +2,7 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Set
 
 from aioquic.asyncio import connect, serve
 from aioquic.quic.configuration import QuicConfiguration
@@ -30,7 +30,7 @@ class ChannelMetrics:
     start_time: Optional[float] = None
     last_seq: int = -1
     highest_seq: int = -1  # Track highest sequence number seen
-    received_seqs: set = field(default_factory=set)  # Track all received sequence numbers
+    received_seqs: Set[int] = field(default_factory=set)  # Track all received sequence numbers
 
     def add_rtt(self, rtt_ms: float):
         """Add RTT sample and calculate jitter (RFC 3550)"""
@@ -87,15 +87,12 @@ class ChannelMetrics:
         Expected Packets = highest_seq + 1 (since seq starts at 0)
         
         Returns:
-            PDR as a percentage (0-100)
+            PDR as a percentage (0-100), or 0.0 if no packets have been received yet.
         """
         if self.highest_seq < 0:
-            return 100.0  # No packets received yet
+            return 0.0  # No packets received yet
         
         expected_packets = self.highest_seq + 1
-        if expected_packets == 0:
-            return 100.0
-        
         return (self.packets_received / expected_packets) * 100.0
 
 
@@ -279,7 +276,6 @@ class GameNetAPI:
 
         for channel_name in ["RELIABLE", "UNRELIABLE"]:
             channel_stats = stats["channels"][channel_name]
-            metrics = self.metrics[channel_name]
 
             print(f"\n  {channel_name} Channel:")
             print(f"    Packets Received:         {channel_stats['packets_received']}")
@@ -352,8 +348,8 @@ class GameNetAPI:
             port=self.port,
             configuration=self.config,
             create_protocol=lambda *args, **kwargs: GameServerProtocol(
-                *args, 
-                on_message=self.on_message, 
+                *args,
+                on_message=self.on_message,
                 on_connection_terminated=self.on_connection_terminated,
                 **kwargs
             ),
