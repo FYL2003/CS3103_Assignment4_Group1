@@ -80,6 +80,46 @@ class GameNetAPI:
         self.seq[channel] += 1
         self.conn.transmit()
 
+    async def receive(self, timeout=None):
+        if not self.connected:
+            raise RuntimeError("Not connected — call connect() first")
+        
+        start_time = time.time()
+        while True:
+            # Stream data (reliable messages)
+            for stream_id in list(self.conn._quic._streams.keys()):
+                stream = self.conn._quic._streams.get(stream_id)
+                if stream and hasattr(stream, 'receiver'):
+                    try:
+                        data = self.conn._quic._stream_data_received.get(stream_id)
+                        if data:
+                            del self.conn._quic._stream_data_received[stream_id]
+                            return await self._parse_packet(data, reliable=True)
+                    except (KeyError, AttributeError):
+                        pass
+            
+            # Datagram data (unreliable messages)
+            try:
+                datagram = self.conn._quic.receive_datagram()
+                if datagram:
+                    return await self._parse_packet(datagram, reliable=False)
+            except Exception:
+                pass
+            
+            # Check timeout
+            if timeout is not None and (time.time() - start_time) >= timeout:
+                return None
+            
+            # Small sleep to prevent busy-waiting
+            await asyncio.sleep(0.01)
+
+    async def _parse_packet(self, packet: bytes, reliable: bool):
+        if len(packet) < 11:  # 1 byte channel + 2 bytes seq + 8 bytes timestamp
+            return None
+        
+        payload = packet[11:].decode()
+        return payload
+
     async def close(self):
         if not self.connected:
             return
