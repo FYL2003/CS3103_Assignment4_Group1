@@ -71,9 +71,9 @@ def generate_self_signed_cert(certfile="cert.pem", keyfile="key.pem", force=Fals
             private_key.public_key()
         ).serial_number(
             x509.random_serial_number()
-        ).not_valid_before_utc(
+        ).not_valid_before(
             now_utc
-        ).not_valid_after_utc(
+        ).not_valid_after(
             # Valid for 365 days
             now_utc + timedelta(days=365)
         ).add_extension(
