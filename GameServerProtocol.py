@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import time
 
 from aioquic.asyncio.protocol import QuicConnectionProtocol
@@ -15,6 +16,8 @@ UNRELIABLE = 0
 RETRANSMISSION_TIMEOUT = 0.2  # 200 ms default
 TIMESTAMP_BYTES = 8
 
+logger = logging.getLogger(__name__)
+
 
 class GameServerProtocol(QuicConnectionProtocol):
     def __init__(self, *args, on_message=None, on_connection_terminated=None, **kwargs):
@@ -29,7 +32,7 @@ class GameServerProtocol(QuicConnectionProtocol):
         try:
             task.result()
         except Exception as e:
-            print(f"Error in connection termination callback: {e}")
+            logger.error(f"Error in connection termination callback: {e}", exc_info=True)
 
     def quic_event_received(self, event):
         if isinstance(event, StreamDataReceived):

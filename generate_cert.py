@@ -62,6 +62,7 @@ def generate_self_signed_cert(certfile="cert.pem", keyfile="key.pem", force=Fals
         
         # Create certificate
         print("   📜 Creating X.509 certificate...")
+        now_utc = datetime.now(timezone.utc)
         cert = x509.CertificateBuilder().subject_name(
             subject
         ).issuer_name(
@@ -71,10 +72,10 @@ def generate_self_signed_cert(certfile="cert.pem", keyfile="key.pem", force=Fals
         ).serial_number(
             x509.random_serial_number()
         ).not_valid_before_utc(
-            datetime.now(timezone.utc)
+            now_utc
         ).not_valid_after_utc(
             # Valid for 365 days
-            datetime.now(timezone.utc) + timedelta(days=365)
+            now_utc + timedelta(days=365)
         ).add_extension(
             # Add Subject Alternative Names for localhost
             x509.SubjectAlternativeName([
@@ -108,8 +109,8 @@ def generate_self_signed_cert(certfile="cert.pem", keyfile="key.pem", force=Fals
         print(f"✅ Successfully generated certificates!")
         print(f"   Certificate: {certfile}")
         print(f"   Private Key: {keyfile}")
-        print(f"   Valid from:  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
-        print(f"   Valid until: {(datetime.now(timezone.utc) + timedelta(days=365)).strftime('%Y-%m-%d %H:%M:%S')} UTC")
+        print(f"   Valid from:  {now_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+        print(f"   Valid until: {(now_utc + timedelta(days=365)).strftime('%Y-%m-%d %H:%M:%S')} UTC")
         
         return certfile, keyfile
         

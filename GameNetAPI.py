@@ -8,6 +8,7 @@ from aioquic.asyncio import connect, serve
 from aioquic.quic.configuration import QuicConfiguration
 
 from GameServerProtocol import GameServerProtocol
+from generate_cert import ensure_certificates
 
 RELIABLE = 1
 UNRELIABLE = 0
@@ -19,7 +20,15 @@ TIMESTAMP_BYTES = 8
 # -------------------- Metrics Classes --------------------
 @dataclass
 class ChannelMetrics:
-    """Metrics for a single channel (reliable or unreliable)"""
+    """
+    Metrics for a single channel (reliable or unreliable)
+    
+    Memory Considerations:
+    - received_seqs set grows unbounded with each unique sequence number
+    - For long-running sessions, this can lead to significant memory usage
+    - Consider implementing cleanup strategies for production deployments
+      (e.g., sliding window, periodic reset, or capacity limits)
+    """
 
     packets_received: int = 0
     packets_delivered: int = 0
@@ -30,7 +39,7 @@ class ChannelMetrics:
     start_time: Optional[float] = None
     last_seq: int = -1
     highest_seq: int = -1  # Track highest sequence number seen
-    received_seqs: Set[int] = field(default_factory=set)  # Track all received sequence numbers
+    received_seqs: Set[int] = field(default_factory=set)  # Track all received sequence numbers for PDR calculation
 
     def add_rtt(self, rtt_ms: float):
         """Add RTT sample and calculate jitter (RFC 3550)"""
@@ -86,6 +95,12 @@ class ChannelMetrics:
         PDR = (Packets Received / Expected Packets) * 100%
         Expected Packets = highest_seq + 1 (since seq starts at 0)
         
+        Assumptions:
+        - Sequence numbers start at 0 for each channel
+        - Sequence numbers are consecutive and increment by 1
+        - No sequence number resets occur during the session
+        - Single sender per channel (no multi-sender scenarios)
+        
         Returns:
             PDR as a percentage (0-100), or 0.0 if no packets have been received yet.
         """
@@ -114,12 +129,12 @@ class GameNetAPI:
         self.on_message = None  # callback for received messages
         self.on_connection_terminated = None  # callback for connection termination
         
-        # Metrics tracking for server mode
-        self.metrics = {"RELIABLE": ChannelMetrics(), "UNRELIABLE": ChannelMetrics()}
-        self.start_time: Optional[float] = None
-        self.total_arrivals: int = 0
-        
         if not isClient:
+            # Metrics tracking for server mode only
+            self.metrics = {"RELIABLE": ChannelMetrics(), "UNRELIABLE": ChannelMetrics()}
+            self.start_time: Optional[float] = None
+            self.total_arrivals: int = 0
+            
             # Ensure certificates exist for server mode
             certfile, keyfile = self._ensure_certificates(certfile, keyfile)
             self.config.load_cert_chain(certfile=certfile, keyfile=keyfile)
@@ -135,7 +150,6 @@ class GameNetAPI:
 
     def _ensure_certificates(self, certfile, keyfile):
         """Ensure SSL certificates exist, generate if needed"""
-        from generate_cert import ensure_certificates
         return ensure_certificates(certfile, keyfile)
 
     async def connect(self):
