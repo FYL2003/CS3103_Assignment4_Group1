@@ -17,11 +17,12 @@ TIMESTAMP_BYTES = 8
 
 
 class GameServerProtocol(QuicConnectionProtocol):
-    def __init__(self, *args, on_message=None, **kwargs):
+    def __init__(self, *args, on_message=None, on_connection_terminated=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.reliable_buffer = {}  # seq_no -> packet
         self.expected_seq = 0  # next expected reliable seq
         self.on_message = on_message  # callback for received messages
+        self.on_connection_terminated = on_connection_terminated  # callback for connection termination
 
     def quic_event_received(self, event):
         if isinstance(event, StreamDataReceived):
@@ -39,6 +40,8 @@ class GameServerProtocol(QuicConnectionProtocol):
 
         elif isinstance(event, ConnectionTerminated):
             print("Connection terminated by client")
+            if self.on_connection_terminated:
+                asyncio.create_task(self.on_connection_terminated())
 
     async def _handle_packet(self, packet: bytes, reliable: bool):
         # header: 1 byte channel | 2 bytes seq_no | 8 bytes timestamp
