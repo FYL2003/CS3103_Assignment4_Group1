@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import time
 
 from aioquic.asyncio.protocol import QuicConnectionProtocol
@@ -15,13 +16,33 @@ UNRELIABLE = 0
 RETRANSMISSION_TIMEOUT = 0.2  # 200 ms default
 TIMESTAMP_BYTES = 8
 
+logger = logging.getLogger(__name__)
+
 
 class GameServerProtocol(QuicConnectionProtocol):
-    def __init__(self, *args, on_message=None, **kwargs):
+    """
+    QUIC protocol handler for game server
+    
+    Callback Behavior:
+    - on_message: Called for each received packet (runs in event loop)
+    - on_connection_terminated: Called when connection ends (runs asynchronously)
+      Note: Callback runs as a background task and does not block protocol termination.
+      Callbacks should complete quickly or handle their own async operations.
+      Any exceptions are logged but do not affect protocol shutdown.
+    """
+    def __init__(self, *args, on_message=None, on_connection_terminated=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.reliable_buffer = {}  # seq_no -> packet
         self.expected_seq = 0  # next expected reliable seq
         self.on_message = on_message  # callback for received messages
+        self.on_connection_terminated = on_connection_terminated  # callback for connection termination
+
+    def _handle_callback_error(self, task):
+        """Handle exceptions from connection termination callback"""
+        try:
+            task.result()
+        except Exception as e:
+            logger.error(f"Error in connection termination callback: {e}", exc_info=True)
 
     def quic_event_received(self, event):
         if isinstance(event, StreamDataReceived):
@@ -39,6 +60,10 @@ class GameServerProtocol(QuicConnectionProtocol):
 
         elif isinstance(event, ConnectionTerminated):
             print("Connection terminated by client")
+            if self.on_connection_terminated:
+                task = asyncio.create_task(self.on_connection_terminated())
+                # Add error handler to prevent silent failures
+                task.add_done_callback(self._handle_callback_error)
 
     async def _handle_packet(self, packet: bytes, reliable: bool):
         # header: 1 byte channel | 2 bytes seq_no | 8 bytes timestamp

@@ -14,12 +14,11 @@ import asyncio
 import json
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional
 
 from GameNetAPI import GameNetAPI
-from generate_cert import ensure_certificates
 
 # Configure detailed logging
 logging.basicConfig(
@@ -43,67 +42,6 @@ class PacketInfo:
     rtt_ms: float
     payload: dict
     out_of_order: bool = False
-
-
-@dataclass
-class ChannelMetrics:
-    """Metrics for a single channel (reliable or unreliable)"""
-
-    packets_received: int = 0
-    packets_delivered: int = 0
-    bytes_received: int = 0
-    rtts: List[float] = field(default_factory=list)
-    jitter_samples: List[float] = field(default_factory=list)
-    last_rtt: Optional[float] = None
-    start_time: Optional[float] = None
-    last_seq: int = -1
-
-    def add_rtt(self, rtt_ms: float):
-        """Add RTT sample and calculate jitter (RFC 3550)"""
-        self.rtts.append(rtt_ms)
-
-        if self.last_rtt is not None:
-            jitter = abs(rtt_ms - self.last_rtt)
-            self.jitter_samples.append(jitter)
-
-        self.last_rtt = rtt_ms
-
-    @property
-    def avg_rtt(self) -> float:
-        """Average RTT in milliseconds"""
-        return sum(self.rtts) / len(self.rtts) if self.rtts else 0.0
-
-    @property
-    def min_rtt(self) -> float:
-        """Minimum RTT in milliseconds"""
-        return min(self.rtts) if self.rtts else 0.0
-
-    @property
-    def max_rtt(self) -> float:
-        """Maximum RTT in milliseconds"""
-        return max(self.rtts) if self.rtts else 0.0
-
-    @property
-    def avg_jitter(self) -> float:
-        """Average jitter in milliseconds (RFC 3550)"""
-        return (
-            sum(self.jitter_samples) / len(self.jitter_samples)
-            if self.jitter_samples
-            else 0.0
-        )
-
-    @property
-    def throughput_bps(self) -> float:
-        """Throughput in bits per second"""
-        if self.start_time is None:
-            return 0.0
-        duration = time.time() - self.start_time
-        return (self.bytes_received * 8) / duration if duration > 0 else 0.0
-
-    @property
-    def throughput_kbps(self) -> float:
-        """Throughput in kilobits per second"""
-        return self.throughput_bps / 1000.0
 
 
 # -------------------- Receiver Application --------------------
@@ -142,30 +80,20 @@ class ReceiverApplication:
         self.certfile = certfile
         self.keyfile = keyfile
 
-        # Ensure certificates exist before initializing API
-        logger.info("Checking SSL certificates...")
-        self.certfile, self.keyfile = ensure_certificates(certfile, keyfile)
-
         # Initialize GameNetAPI in SERVER mode
+        # Certificate generation is now handled inside GameNetAPI
         self.api = GameNetAPI(
             isClient=False,
             host=host,
             port=port,
-            certfile=self.certfile,
-            keyfile=self.keyfile,
+            certfile=certfile,
+            keyfile=keyfile,
         )
-
-        # Metrics tracking
-        self.metrics = {"RELIABLE": ChannelMetrics(), "UNRELIABLE": ChannelMetrics()}
 
         # Packet tracking
         self.delivered_packets: List[PacketInfo] = []
         self.packet_arrival_times: Dict[int, float] = {}
         self.packet_send_times: Dict[int, float] = {}
-
-        # Overall statistics
-        self.start_time: Optional[float] = None
-        self.total_arrivals: int = 0
 
         # Control flags
         self.running: bool = False
@@ -178,6 +106,9 @@ class ReceiverApplication:
 
         # Set up message callback
         self.api.set_message_callback(self.on_message)
+
+        # Set up connection termination callback
+        self.api.set_connection_terminated_callback(self.on_connection_terminated)
 
     def print_startup_header(self):
         """Print formatted startup header"""
@@ -198,7 +129,7 @@ class ReceiverApplication:
 
     async def start(self):
         """Start the receiver server"""
-        self.start_time = time.time()
+        self.api.start_time = time.time()
         self.running = True
 
         logger.info("Starting H-QUIC receiver server...")
@@ -216,56 +147,56 @@ class ReceiverApplication:
         timestamp = data["timestamp"] / 1000.0  # Convert ms to seconds
         payload = data["payload"]
 
-        arrival_time = time.time()
-        self.total_arrivals += 1
-
-        # Determine channel
-        channel = "RELIABLE" if reliable else "UNRELIABLE"
-        metrics = self.metrics[channel]
-
-        # Initialize channel start time
-        if metrics.start_time is None:
-            metrics.start_time = arrival_time
-
-        # Store timing information
-        self.packet_arrival_times[seq_no] = arrival_time
+        # Track metrics using API
+        metrics_data = self.api.track_packet_metrics(seq_no, timestamp, payload, reliable)
+        # Store timing information for application use
+        self.packet_arrival_times[seq_no] = metrics_data["arrival_time"]
         self.packet_send_times[seq_no] = timestamp
-
-        # Calculate RTT (one-way latency approximation)
-        rtt_ms = (arrival_time - timestamp) * 1000
-
-        # Add RTT to metrics (also calculates jitter)
-        metrics.add_rtt(rtt_ms)
-
-        # Update receive counters
-        metrics.packets_received += 1
-        payload_bytes = len(json.dumps(payload).encode())
-        metrics.bytes_received += payload_bytes
-
-        # Detect out-of-order delivery
-        out_of_order = seq_no <= metrics.last_seq and metrics.last_seq >= 0
-        if not out_of_order:
-            metrics.last_seq = seq_no
 
         # Log packet arrival
         self.log_packet_arrival(
             seq_no=seq_no,
-            channel=channel,
+            channel=metrics_data["channel"],
             timestamp=timestamp,
-            rtt_ms=rtt_ms,
-            out_of_order=out_of_order,
+            rtt_ms=metrics_data["rtt_ms"],
+            out_of_order=metrics_data["out_of_order"],
         )
 
         # Deliver packet to application
         await self.deliver_packet(
             seq_no=seq_no,
-            channel=channel,
+            channel=metrics_data["channel"],
             timestamp=timestamp,
-            arrival_time=arrival_time,
-            rtt_ms=rtt_ms,
+            arrival_time=metrics_data["arrival_time"],
+            rtt_ms=metrics_data["rtt_ms"],
             payload=payload,
-            out_of_order=out_of_order,
+            out_of_order=metrics_data["out_of_order"],
         )
+
+    async def on_connection_terminated(self):
+        """Callback when client connection is terminated - display statistics"""
+        logger.info("")
+        logger.info("=" * 100)
+        logger.info("CLIENT CONNECTION TERMINATED")
+        logger.info("=" * 100)
+
+        # Display statistics
+        out_of_order_count = sum(1 for p in self.delivered_packets if p.out_of_order)
+        self.api.print_statistics(
+            delivered_packets_count=len(self.delivered_packets),
+            out_of_order_count=out_of_order_count
+        )
+        
+        # Clear delivered packets list for next connection
+        self.delivered_packets.clear()
+        self.packet_arrival_times.clear()
+        self.packet_send_times.clear()
+
+        logger.info("")
+        logger.info("=" * 100)
+        logger.info("Server continues running - waiting for new connections...")
+        logger.info("Press Ctrl+C to stop the server")
+        logger.info("=" * 100)
 
     async def receive_loop(self):
         """
@@ -287,69 +218,6 @@ class ReceiverApplication:
             logger.info("\nReceive loop cancelled")
         except Exception as e:
             logger.error(f"Error in receive loop: {e}", exc_info=True)
-
-    async def process_packet(
-        self, seq_no: int, timestamp: float, payload: dict, reliable: bool
-    ):
-        """
-        Process a received packet
-
-        Args:
-            seq_no: Packet sequence number
-            timestamp: Original send timestamp (seconds)
-            payload: Packet payload data
-            reliable: True if RELIABLE channel, False if UNRELIABLE
-        """
-        arrival_time = time.time()
-        self.total_arrivals += 1
-
-        # Determine channel
-        channel = "RELIABLE" if reliable else "UNRELIABLE"
-        metrics = self.metrics[channel]
-
-        # Initialize channel start time
-        if metrics.start_time is None:
-            metrics.start_time = arrival_time
-
-        # Store timing information
-        self.packet_arrival_times[seq_no] = arrival_time
-        self.packet_send_times[seq_no] = timestamp
-
-        # Calculate RTT (one-way latency approximation)
-        rtt_ms = (arrival_time - timestamp) * 1000
-
-        # Add RTT to metrics (also calculates jitter)
-        metrics.add_rtt(rtt_ms)
-
-        # Update receive counters
-        metrics.packets_received += 1
-        payload_bytes = len(json.dumps(payload).encode())
-        metrics.bytes_received += payload_bytes
-
-        # Detect out-of-order delivery
-        out_of_order = seq_no <= metrics.last_seq and metrics.last_seq >= 0
-        if not out_of_order:
-            metrics.last_seq = seq_no
-
-        # Log packet arrival
-        self.log_packet_arrival(
-            seq_no=seq_no,
-            channel=channel,
-            timestamp=timestamp,
-            rtt_ms=rtt_ms,
-            out_of_order=out_of_order,
-        )
-
-        # Deliver packet to application
-        await self.deliver_packet(
-            seq_no=seq_no,
-            channel=channel,
-            timestamp=timestamp,
-            arrival_time=arrival_time,
-            rtt_ms=rtt_ms,
-            payload=payload,
-            out_of_order=out_of_order,
-        )
 
     def log_packet_arrival(
         self,
@@ -408,7 +276,7 @@ class ReceiverApplication:
         total_delay_ms = (delivery_time - timestamp) * 1000
 
         # Update metrics
-        metrics = self.metrics[channel]
+        metrics = self.api.metrics[channel]
         metrics.packets_delivered += 1
 
         # Store packet info
@@ -485,106 +353,18 @@ class ReceiverApplication:
         )
 
     async def stop(self):
-        """Stop the receiver and print final statistics"""
+        """Stop the receiver gracefully"""
         self.running = False
 
         logger.info("\n" + "=" * 100)
         logger.info("STOPPING RECEIVER APPLICATION")
-        logger.info("=" * 100 + "\n")
-
-        # Print comprehensive statistics
-        self.print_statistics()
+        logger.info("=" * 100)
 
         # Close API connection
         await self.api.close()
 
-        logger.info("\n" + "=" * 100)
         logger.info("Receiver stopped successfully")
         logger.info("=" * 100 + "\n")
-
-    def print_statistics(self):
-        """
-        Print comprehensive statistics report
-
-        Satisfies assignment requirement (i): Measure performance metrics
-        including latency, jitter, throughput, and packet delivery ratio
-        """
-        runtime = time.time() - self.start_time if self.start_time else 0
-
-        print("=" * 100)
-        print("H-QUIC RECEIVER STATISTICS")
-        print("=" * 100)
-
-        # Overall statistics
-        print(f"\n{'OVERALL STATISTICS':^100}")
-        print("-" * 100)
-        print(f"  Total Runtime:              {runtime:.2f} seconds")
-        print(f"  Total Packets Received:     {self.total_arrivals}")
-        print(f"  Total Packets Delivered:    {len(self.delivered_packets)}")
-
-        # Calculate total throughput
-        total_bytes = sum(m.bytes_received for m in self.metrics.values())
-        total_throughput_kbps = (
-            (total_bytes * 8) / (runtime * 1000) if runtime > 0 else 0
-        )
-        print(f"  Total Bytes Received:       {total_bytes:,} bytes")
-        print(f"  Overall Throughput:         {total_throughput_kbps:.2f} Kbps")
-
-        # Channel-specific statistics
-        print(f"\n{'CHANNEL-SPECIFIC STATISTICS':^100}")
-        print("-" * 100)
-
-        for channel_name in ["RELIABLE", "UNRELIABLE"]:
-            metrics = self.metrics[channel_name]
-
-            print(f"\n  {channel_name} Channel:")
-            print(f"    Packets Received:         {metrics.packets_received}")
-            print(f"    Packets Delivered:        {metrics.packets_delivered}")
-            print(f"    Bytes Received:           {metrics.bytes_received:,} bytes")
-
-            if metrics.rtts:
-                print(f"\n    Latency (RTT):")
-                print(f"      Average:                {metrics.avg_rtt:.2f} ms")
-                print(f"      Minimum:                {metrics.min_rtt:.2f} ms")
-                print(f"      Maximum:                {metrics.max_rtt:.2f} ms")
-
-                print(f"\n    Jitter (RFC 3550):")
-                print(f"      Average:                {metrics.avg_jitter:.2f} ms")
-                if metrics.jitter_samples:
-                    print(
-                        f"      Minimum:                {min(metrics.jitter_samples):.2f} ms"
-                    )
-                    print(
-                        f"      Maximum:                {max(metrics.jitter_samples):.2f} ms"
-                    )
-
-                print(f"\n    Throughput:")
-                print(
-                    f"      Rate:                   {metrics.throughput_kbps:.2f} Kbps"
-                )
-                print(
-                    f"      Rate:                   {metrics.throughput_kbps/8:.2f} KBps"
-                )
-
-                # Calculate PDR (assuming we sent same number as received for demo)
-                # In production, sender would send this information
-                pdr = (
-                    (metrics.packets_received / metrics.packets_delivered * 100)
-                    if metrics.packets_delivered > 0
-                    else 0
-                )
-                print(f"      Packet Delivery Ratio:                    {pdr:.2f}%")
-
-        # Out-of-order statistics
-        out_of_order_count = sum(1 for p in self.delivered_packets if p.out_of_order)
-        print(f"\n{'ORDERING STATISTICS':^100}")
-        print("-" * 100)
-        print(f"  Out-of-Order Packets:       {out_of_order_count}")
-        print(
-            f"  In-Order Packets:           {len(self.delivered_packets) - out_of_order_count}"
-        )
-
-        print("=" * 100)
 
 
 # -------------------- Main Entry Point --------------------
