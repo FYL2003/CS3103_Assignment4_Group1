@@ -32,7 +32,9 @@ async def wait_for_keypress(stop_event):
                     break
             await asyncio.sleep(0.05)
     else:
-        import termios, tty, select
+        import termios
+        import tty
+        import select
         fd = sys.stdin.fileno()
         old_settings = termios.tcgetattr(fd)
         try:
