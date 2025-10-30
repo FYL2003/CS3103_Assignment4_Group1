@@ -1,11 +1,11 @@
 import asyncio
 import random
 import sys
-import termios
-import tty
+import platform
 from GameNetAPI import GameNetAPI
 
 def generate_game_data():
+    """Generate random game data packet for testing."""
     player_id = random.randint(1, 10)
     pos_x = random.uniform(0, 500)
     pos_y = random.uniform(0, 500)
@@ -19,59 +19,63 @@ def generate_game_data():
         "location": location
     }
 
-async def send_task(api, stop_event):
+async def wait_for_keypress(stop_event):
+    """Wait for user to press 'q' key to stop the client."""
+    print("Press 'q' to stop...\n")
+    if platform.system() == "Windows":
+        import msvcrt
+        while not stop_event.is_set():
+            if msvcrt.kbhit():
+                key = msvcrt.getch()
+                if key.lower() == b'q':
+                    stop_event.set()
+                    break
+            await asyncio.sleep(0.05)
+    else:
+        import termios, tty, select
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            while not stop_event.is_set():
+                if select.select([sys.stdin], [], [], 0.1)[0]:
+                    key = sys.stdin.read(1)
+                    if key.lower() == 'q':
+                        stop_event.set()
+                        break
+                await asyncio.sleep(0.05)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+async def send_task(stop_event, api):
+    """Continuously send game data packets to the server."""
     while not stop_event.is_set():
+        # add reliable or unreliable tag randomly
         reliable = random.choice([True, False])
         data = generate_game_data()
         await api.send(data, reliable=reliable)
         await asyncio.sleep(0.05)
 
-async def receive_task(api, stop_event):
-    while not stop_event.is_set():
-        response = await api.receive(timeout=0.1)
-        if response:
-            print(f"Received from server: {response}")
-
-async def wait_for_keypress(stop_event):
-    print("Press any key to stop...\n")
-    
-    # Save terminal settings
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
-    try:
-        # Set terminal to raw mode
-        tty.setraw(fd)
-        # Wait for key press in a non-blocking way
-        while not stop_event.is_set():
-            # Check if input is available
-            import select
-            if select.select([sys.stdin], [], [], 0.1)[0]:
-                sys.stdin.read(1)
-                print("\n\nKey pressed! Shutting down...")
-                stop_event.set()
-                break
-            await asyncio.sleep(0.1)
-    finally:
-        # Restore terminal settings
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-
 async def main():
+    stop_event = asyncio.Event()
     api = GameNetAPI()
+
+    async def handle_message(data, reliable):
+        """Callback for received messages from server"""
+        print(f"[SERVER -> CLIENT] {data} (reliable={reliable})")
+
+    api.set_message_callback(handle_message)
     await api.connect()
 
-    stop_event = asyncio.Event()
+    # Run both tasks concurrently
+    await asyncio.gather(
+        wait_for_keypress(stop_event),
+        send_task(stop_event, api),
+        return_exceptions=True
+    )
 
-    # Run send, receive, and keypress listener concurrently
-    send = asyncio.create_task(send_task(api, stop_event))
-    receive = asyncio.create_task(receive_task(api, stop_event))
-    keypress = asyncio.create_task(wait_for_keypress(stop_event))
-    
-    await keypress
-    await send
-    await receive
-    
     await api.close()
-    print("Connection closed")
+
 
 if __name__ == "__main__":
     asyncio.run(main())
