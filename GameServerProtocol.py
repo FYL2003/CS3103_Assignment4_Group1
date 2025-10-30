@@ -21,6 +21,7 @@ class GameServerProtocol(QuicConnectionProtocol):
         super().__init__(*args, **kwargs)
         self.reliable_buffer = {}  # seq_no -> packet
         self.expected_seq = 0  # next expected reliable seq
+        self.next_ack_seq = 0  # seq for server -> client packets
         self.on_message = on_message  # callback for received messages
 
     def quic_event_received(self, event):
@@ -101,6 +102,27 @@ class GameServerProtocol(QuicConnectionProtocol):
                 "payload": data,  # Original data payload
             }
             try:
-                await self.on_message(formatted_data, reliable)
+                await self.on_message(formatted_data, reliable, self)
             except Exception as e:
                 print(f"Error in message callback: {e}")
+
+    async def send_packet(self, data: dict, reliable: bool = True):
+        """Send a packet to the client with proper seq and timestamp."""
+        channel_byte = (0 if not reliable else 1).to_bytes(1, "big")
+        seq_no = self.next_ack_seq if reliable else 0
+        seq_bytes = seq_no.to_bytes(2, "big")
+        timestamp = int(time.time() * 1000)
+        ts_bytes = timestamp.to_bytes(TIMESTAMP_BYTES, "big")
+        payload_bytes = json.dumps(data).encode()
+        packet = channel_byte + seq_bytes + ts_bytes + payload_bytes
+
+        if reliable:
+            # send over a new QUIC stream for guaranteed delivery
+            stream_id = self._quic.get_next_available_stream_id()
+            self._quic.send_stream_data(stream_id, packet, end_stream=True)
+            self.next_ack_seq = (self.next_ack_seq + 1) % 65536
+        else:
+            self._quic.send_datagram_frame(packet)
+
+        self.transmit()
+        print(f"[SERVER-SEND] Seq {seq_no} | Reliable={reliable} | Data: {data}")
