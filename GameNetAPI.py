@@ -4,6 +4,8 @@ import time
 
 from aioquic.asyncio import connect, serve
 from aioquic.quic.configuration import QuicConfiguration
+from aioquic.quic.events import StreamDataReceived, DatagramFrameReceived
+from aioquic.asyncio.protocol import QuicConnectionProtocol
 
 from GameServerProtocol import GameServerProtocol
 
@@ -13,6 +15,75 @@ UNRELIABLE = 0
 RETRANSMISSION_TIMEOUT = 0.2  # 200 ms default
 TIMESTAMP_BYTES = 8
 
+class GameClientProtocol(QuicConnectionProtocol):
+    """Custom protocol for client to receive messages from server"""
+    
+    def __init__(self, *args, on_message=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.on_message = on_message
+        self.seq = {RELIABLE: 0, UNRELIABLE: 0}
+
+    def quic_event_received(self, event):
+        """Handle incoming QUIC events (messages from server)"""
+        if isinstance(event, StreamDataReceived):
+            asyncio.create_task(self._handle_stream_data(event))
+        elif isinstance(event, DatagramFrameReceived):
+            asyncio.create_task(self._handle_datagram(event))
+
+    async def _handle_stream_data(self, event):
+        """Handle reliable stream data from server"""
+        try:
+            header_len = 1 + 2 + TIMESTAMP_BYTES
+            if len(event.data) < header_len:
+                return
+            
+            payload_bytes = event.data[header_len:]
+            payload = json.loads(payload_bytes.decode())
+            
+            if self.on_message:
+                await self.on_message(payload, reliable=True)
+        except Exception as e:
+            print(f"[CLIENT] Error handling stream data: {e}")
+
+    async def _handle_datagram(self, event):
+        """Handle unreliable datagram from server"""
+        try:
+            header_len = 1 + 2 + TIMESTAMP_BYTES
+            if len(event.data) < header_len:
+                return
+            
+            payload_bytes = event.data[header_len:]
+            payload = json.loads(payload_bytes.decode())
+            
+            if self.on_message:
+                await self.on_message(payload, reliable=False)
+        except Exception as e:
+            print(f"[CLIENT] Error handling datagram: {e}")
+
+    async def send_packet(self, data: dict, reliable: bool = True):
+        """Send a packet to the server with proper seq and timestamp"""
+        channel = RELIABLE if reliable else UNRELIABLE
+        seq_no = self.seq[channel]
+        timestamp = int(time.time() * 1000)
+        
+        payload = json.dumps(data)
+        header = (
+            channel.to_bytes(1, "big")
+            + seq_no.to_bytes(2, "big")
+            + timestamp.to_bytes(TIMESTAMP_BYTES, "big")
+        )
+        packet = header + payload.encode()
+
+        if reliable:
+            stream_id = self._quic.get_next_available_stream_id()
+            self._quic.send_stream_data(stream_id, packet, end_stream=True)
+            print(f"[RELIABLE] Sent Seq {seq_no}: {payload}")
+        else:
+            self._quic.send_datagram_frame(packet)
+            print(f"[UNRELIABLE] Sent Seq {seq_no}: {payload}")
+
+        self.seq[channel] += 1
+        self.transmit()
 
 class GameNetAPI:
     def __init__(
@@ -46,7 +117,14 @@ class GameNetAPI:
             raise RuntimeError("connect() should only be used in client mode")
 
         print(f"Connecting to {self.host}:{self.port} ...")
-        self._connect_ctx = connect(self.host, self.port, configuration=self.config)
+        self._connect_ctx = connect(
+            self.host,
+            self.port,
+            configuration=self.config,
+            create_protocol=lambda *args, **kwargs: GameClientProtocol(
+                *args, on_message=self.on_message, **kwargs
+            ),
+        )
         self.conn = await self._connect_ctx.__aenter__()
         self.connected = True
         print("Connected to QUIC server")
@@ -55,70 +133,7 @@ class GameNetAPI:
         if not self.connected:
             raise RuntimeError("Not connected — call connect() first")
 
-        channel = RELIABLE if reliable else UNRELIABLE
-        seq_no = self.seq[channel]
-        timestamp = int(time.time() * 1000)
-
-        payload = json.dumps(data)
-        header = (
-            channel.to_bytes(1, "big")
-            + seq_no.to_bytes(2, "big")
-            + timestamp.to_bytes(8, "big")
-        )
-        packet = header + payload.encode()
-
-        if reliable:
-            stream_id = self.conn._quic.get_next_available_stream_id()
-            self.conn._quic.send_stream_data(stream_id, packet)
-            print(f"[RELIABLE] Sent Seq {seq_no}: {payload}")
-            print(f"Corresponding packet: {packet}")
-        else:
-            self.conn._quic.send_datagram_frame(packet)
-            print(f"[UNRELIABLE] Sent Seq {seq_no}: {payload}")
-            print(f"Corresponding packet: {packet}")
-
-        self.seq[channel] += 1
-        self.conn.transmit()
-
-    async def receive(self, timeout=None):
-        if not self.connected:
-            raise RuntimeError("Not connected — call connect() first")
-        
-        start_time = time.time()
-        while True:
-            # Stream data (reliable messages)
-            for stream_id in list(self.conn._quic._streams.keys()):
-                stream = self.conn._quic._streams.get(stream_id)
-                if stream and hasattr(stream, 'receiver'):
-                    try:
-                        data = self.conn._quic._stream_data_received.get(stream_id)
-                        if data:
-                            del self.conn._quic._stream_data_received[stream_id]
-                            return await self._parse_packet(data, reliable=True)
-                    except (KeyError, AttributeError):
-                        pass
-            
-            # Datagram data (unreliable messages)
-            try:
-                datagram = self.conn._quic.receive_datagram()
-                if datagram:
-                    return await self._parse_packet(datagram, reliable=False)
-            except Exception:
-                pass
-            
-            # Check timeout
-            if timeout is not None and (time.time() - start_time) >= timeout:
-                return None
-            
-            # Small sleep to prevent busy-waiting
-            await asyncio.sleep(0.01)
-
-    async def _parse_packet(self, packet: bytes, reliable: bool):
-        if len(packet) < 11:  # 1 byte channel + 2 bytes seq + 8 bytes timestamp
-            return None
-        
-        payload = packet[11:].decode()
-        return payload
+        await self.conn.send_packet(data, reliable=reliable)
 
     async def close(self):
         if not self.connected:
