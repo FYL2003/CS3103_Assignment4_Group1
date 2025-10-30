@@ -209,7 +209,7 @@ class ReceiverApplication:
         logger.info(f"Server started - Listening on {self.host}:{self.port}\n")
         logger.info("Waiting for packets from clients...\n")
 
-    async def on_message(self, data: dict, reliable: bool):
+    async def on_message(self, data: dict, reliable: bool, proto: GameNetAPI):
         """Callback for received messages - updates metrics"""
         # Extract packet fields
         seq_no = data["seq_no"]
@@ -246,6 +246,13 @@ class ReceiverApplication:
         out_of_order = seq_no <= metrics.last_seq and metrics.last_seq >= 0
         if not out_of_order:
             metrics.last_seq = seq_no
+
+        response = {
+            "ack": "received",
+            "seq_echo": seq_no,
+            "payload_echo": payload,
+        }
+        await proto.send_packet(response, reliable=reliable)    
 
         # Log packet arrival
         self.log_packet_arrival(
