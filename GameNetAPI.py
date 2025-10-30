@@ -163,6 +163,12 @@ class GameNetAPI:
             is_client=isClient, alpn_protocols=["GameNetAPI"]
         )
         self.config.verify_mode = False
+        
+        # Set idle timeout to detect disconnected clients (30 seconds)
+        # This ensures statistics are displayed even if ConnectionTerminated event is missed
+        if not isClient:
+            self.config.idle_timeout = 30.0  # 30 seconds idle timeout for server
+        
         self.seq = {RELIABLE: 0, UNRELIABLE: 0}
         self.connected = False
         self.on_message = None  # callback for received messages
@@ -173,6 +179,7 @@ class GameNetAPI:
             self.metrics = {"RELIABLE": ChannelMetrics(), "UNRELIABLE": ChannelMetrics()}
             self.start_time: Optional[float] = None
             self.total_arrivals: int = 0
+            self.last_packet_time: Optional[float] = None  # Track last packet received time
             
             # Ensure certificates exist for server mode
             certfile, keyfile = self._ensure_certificates(certfile, keyfile)
@@ -213,6 +220,9 @@ class GameNetAPI:
         
         arrival_time = time.time()
         self.total_arrivals += 1
+        
+        # Update last packet time for idle detection
+        self.last_packet_time = arrival_time
         
         # Determine channel
         channel = "RELIABLE" if reliable else "UNRELIABLE"
@@ -438,6 +448,7 @@ class GameNetAPI:
                 channel_metrics.reset_metrics()
             self.start_time = None
             self.total_arrivals = 0
+            self.last_packet_time = None
 
     async def close(self):
         if not self.connected:
