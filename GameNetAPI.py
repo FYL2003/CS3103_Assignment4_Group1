@@ -78,10 +78,15 @@ class GameNetAPI:
     async def connect(self):
         if not self.is_client:
             raise RuntimeError("connect() only for client")
+
         self._connect_ctx = connect(self.host, self.port, configuration=self.config)
         self.conn = await self._connect_ctx.__aenter__()
         self.connected = True
+
+        # Start retransmission and receive loops
         self.retransmission_task = asyncio.create_task(self._retransmission_loop())
+        self.receive_task = asyncio.create_task(self._receive_loop())
+
         print(f"Connected to QUIC server {self.host}:{self.port}")
 
     async def start_server(self):
@@ -111,36 +116,33 @@ class GameNetAPI:
             await self._send_unreliable(data)
 
     async def _send_reliable(self, data: dict):
+        """
+        Send a reliable packet with sequence number and timestamp in header only.
+        """
         seq_no = self.next_reliable_seq
-        timestamp = int(time.time() * 1000)
+        timestamp = int(time.time() * 1000)  # milliseconds
+        payload_bytes = json.dumps(data).encode()
 
-        # Include seq_no and timestamp in payload
-        data_to_send = data.copy()
-        data_to_send["seq_no"] = seq_no
-        data_to_send["timestamp"] = timestamp
-
-        payload = json.dumps(data_to_send)
-
-        # Build header (still keep for protocol)
+        # Header: [channel (1) | seq_no (2) | timestamp (8)]
         header = (
             RELIABLE.to_bytes(1, "big")
             + seq_no.to_bytes(2, "big")
             + timestamp.to_bytes(8, "big")
         )
-        packet_bytes = header + payload.encode()
+        packet_bytes = header + payload_bytes
 
         # Buffer packet for retransmission
         self.reliable_send_buffer[seq_no] = {
             "packet": packet_bytes,
-            "timestamp": time.time(),
-            "payload": payload,
+            "sent_time": time.time(),  # for retransmission timing
         }
 
-        # Send packet
+        # Send via QUIC stream
         stream_id = self.conn._quic.get_next_available_stream_id()
         self.conn._quic.send_stream_data(stream_id, packet_bytes)
         self.conn.transmit()
-        print(f"[RELIABLE] Sent seq {seq_no}: {payload}")
+
+        print(f"[RELIABLE] Sent seq {seq_no}: {data}")
         self.next_reliable_seq += 1
 
     async def _send_unreliable(self, data: dict):
@@ -176,54 +178,60 @@ class GameNetAPI:
             await asyncio.sleep(0.05)
 
     # ----------------------- RECEIVING -----------------------
-    async def on_receive_packet(self, packet_bytes: bytes):
+    async def _receive_loop(self):
+        """Continuously read incoming stream and datagram data."""
+        while self.connected:
+            # Iterate through all streams
+            for stream_id, stream in self.conn._quic._streams.items():
+                # Read any available data
+                if stream.buffer:
+                    data = stream.buffer
+                    stream.buffer = b""
+                    await self._process_incoming_data(data)
+
+            # Process incoming datagrams (for UNRELIABLE)
+            if hasattr(self.conn._quic, "datagrams"):
+                while self.conn._quic.datagrams:
+                    datagram = self.conn._quic.datagrams.pop(0)
+                    await self._process_incoming_data(datagram)
+
+            await asyncio.sleep(0.01)
+
+    async def _process_incoming_data(self, packet_bytes: bytes):
+        """Process received bytes and distinguish between ACK and normal packets."""
+        try:
+            # First, try to decode as ACK
+            payload = json.loads(packet_bytes)
+            if isinstance(payload, dict) and "ack" in payload:
+                await self.on_receive_ack(payload)
+                return
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # Otherwise, treat as normal packet
         channel = packet_bytes[0]
         seq_no = int.from_bytes(packet_bytes[1:3], "big")
+        timestamp = int.from_bytes(packet_bytes[3:11], "big") / 1000.0
         payload = json.loads(packet_bytes[11:])
 
         if channel == RELIABLE:
-            self.reliable_receive_buffer[seq_no] = (payload, time.time())
+            # Buffer for in-order delivery
+            self.reliable_receive_buffer[seq_no] = (payload, timestamp, time.time())
             await self._send_ack(seq_no)
             await self._deliver_in_order()
         elif channel == UNRELIABLE and self.on_message:
             await self.on_message(payload, False)
 
     async def _send_ack(self, seq_no: int):
-        ack_packet = json.dumps({"ack": seq_no})
+        """Send ACK for received reliable packet."""
+        ack_packet = json.dumps({"ack": seq_no}).encode()
         stream_id = self.conn._quic.get_next_available_stream_id()
-        self.conn._quic.send_stream_data(stream_id, ack_packet.encode())
+        self.conn._quic.send_stream_data(stream_id, ack_packet)
         self.conn.transmit()
+        print(f"[RELIABLE] Sent ACK for seq {seq_no}")
 
-    async def _deliver_in_order(self):
-        now = time.time()
-        while True:
-            entry = self.reliable_receive_buffer.get(self.next_expected_seq)
-            if entry is None:
-                # Check for missing packets exceeding timeout
-                missing_seqs = [
-                    s
-                    for s in self.reliable_receive_buffer.keys()
-                    if s > self.next_expected_seq
-                ]
-                if missing_seqs:
-                    first_missing = min(missing_seqs)
-                    payload, arrival_time = self.reliable_receive_buffer.get(
-                        first_missing, (None, now)
-                    )
-                    if now - arrival_time > RETRANSMISSION_TIMEOUT:
-                        print(
-                            f"[RELIABLE] Skipping missing seq {self.next_expected_seq}"
-                        )
-                        self.next_expected_seq = first_missing
-                        continue
-                break
-            payload, _ = self.reliable_receive_buffer.pop(self.next_expected_seq)
-            if self.on_message:
-                await self.on_message(payload, True)
-            self.next_expected_seq += 1
-
-    async def on_receive_ack(self, ack_packet_bytes: bytes):
-        ack_data = json.loads(ack_packet_bytes)
+    async def on_receive_ack(self, ack_data: dict):
+        """Handle ACK received from server."""
         seq_no = ack_data.get("ack")
         if seq_no is not None and seq_no in self.reliable_send_buffer:
             print(f"[RELIABLE] Received ACK for seq {seq_no}")
