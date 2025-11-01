@@ -145,9 +145,10 @@ class ReceiverApplication:
         seq_no = data["seq_no"]
         timestamp = data["timestamp"] / 1000.0  # Convert ms to seconds
         payload = data["payload"]
+        buffer_entry_time = data.get("buffer_entry_time")  # Time when packet entered buffer (or None)
 
-        # Track metrics using API
-        metrics_data = self.api.track_packet_metrics(seq_no, timestamp, payload, reliable)
+        # Track metrics using API (now includes buffering delay calculation)
+        metrics_data = self.api.track_packet_metrics(seq_no, timestamp, payload, reliable, buffer_entry_time)
         # Store timing information for application use
         self.packet_arrival_times[seq_no] = metrics_data["arrival_time"]
         self.packet_send_times[seq_no] = timestamp

@@ -205,7 +205,7 @@ class GameNetAPI:
         """Ensure SSL certificates exist, generate if needed"""
         return ensure_certificates(certfile, keyfile)
 
-    def track_packet_metrics(self, seq_no: int, timestamp: float, payload: dict, reliable: bool) -> dict:
+    def track_packet_metrics(self, seq_no: int, timestamp: float, payload: dict, reliable: bool, buffer_entry_time: Optional[float] = None) -> dict:
         """
         Track metrics for a received packet (server mode only)
         
@@ -214,13 +214,15 @@ class GameNetAPI:
             timestamp: Original send timestamp (seconds)
             payload: Packet payload data
             reliable: True if RELIABLE channel, False if UNRELIABLE
+            buffer_entry_time: Time when packet entered buffer (for reliable packets), or None
             
         Returns:
             Dictionary with calculated metrics:
-            - arrival_time: When packet arrived
+            - arrival_time: When packet arrived (or exited buffer for reliable)
             - rtt_ms: Round-trip time in milliseconds
             - out_of_order: Whether packet was out of order
             - channel: "RELIABLE" or "UNRELIABLE"
+            - buffering_delay_ms: Time spent in buffer (0 for unreliable packets)
         """
         if self.is_client:
             raise RuntimeError("track_packet_metrics() should only be used in server mode")
@@ -238,6 +240,12 @@ class GameNetAPI:
         # Initialize channel start time
         if metrics.start_time is None:
             metrics.start_time = arrival_time
+        
+        # Calculate buffering delay for reliable packets
+        buffering_delay_ms = 0.0
+        if buffer_entry_time is not None:
+            # Reliable packet: calculate time spent in buffer
+            buffering_delay_ms = (arrival_time - buffer_entry_time) * 1000
         
         # Calculate RTT (one-way latency approximation)
         rtt_ms = (arrival_time - timestamp) * 1000
@@ -266,7 +274,8 @@ class GameNetAPI:
             "arrival_time": arrival_time,
             "rtt_ms": rtt_ms,
             "out_of_order": out_of_order,
-            "channel": channel
+            "channel": channel,
+            "buffering_delay_ms": buffering_delay_ms
         }
 
     async def connect(self):

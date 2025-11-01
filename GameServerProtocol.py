@@ -32,7 +32,7 @@ class GameServerProtocol(QuicConnectionProtocol):
     """
     def __init__(self, *args, on_message=None, on_connection_terminated=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.reliable_buffer = {}  # seq_no -> packet
+        self.reliable_buffer = {}  # seq_no -> (data, timestamp, buffer_entry_time)
         self.expected_seq = 0  # next expected reliable seq
         self.on_message = on_message  # callback for received messages
         self.on_connection_terminated = on_connection_terminated  # callback for connection termination
@@ -84,33 +84,39 @@ class GameServerProtocol(QuicConnectionProtocol):
             return
 
         if reliable:
-            # buffer and reorder
-            self.reliable_buffer[seq_no] = (data, timestamp)
+            # buffer and reorder - track when packet enters buffer
+            buffer_entry_time = time.time()
+            self.reliable_buffer[seq_no] = (data, timestamp, buffer_entry_time)
             await self._deliver_reliable()
         else:
-            # deliver immediately
+            # deliver immediately (no buffering delay for unreliable)
             await self._deliver_packet(
-                data, reliable=False, seq_no=seq_no, timestamp=timestamp
+                data, reliable=False, seq_no=seq_no, timestamp=timestamp, buffer_entry_time=None
             )
 
     async def _deliver_reliable(self):
         # deliver all in-order packets
         while self.expected_seq in self.reliable_buffer:
-            data, ts = self.reliable_buffer.pop(self.expected_seq)
+            data, ts, buffer_entry_time = self.reliable_buffer.pop(self.expected_seq)
             await self._deliver_packet(
-                data, reliable=True, seq_no=self.expected_seq, timestamp=ts
+                data, reliable=True, seq_no=self.expected_seq, timestamp=ts, buffer_entry_time=buffer_entry_time
             )
             self.expected_seq += 1
 
-    async def _deliver_packet(self, data, reliable, seq_no, timestamp):
+    async def _deliver_packet(self, data, reliable, seq_no, timestamp, buffer_entry_time):
         """Deliver packet to application callback
 
         Formats the data as expected by ReceiverApplication:
         {
             'seq_no': int,
             'timestamp': float (in ms),
-            'payload': dict (original data)
+            'payload': dict (original data),
+            'buffer_entry_time': float (seconds, or None for unreliable)
         }
+        
+        Args:
+            buffer_entry_time: Time when packet entered buffer (for reliable packets),
+                             or None for unreliable packets (no buffering)
         """
         rtt = int(time.time() * 1000) - timestamp
         print(
@@ -124,6 +130,7 @@ class GameServerProtocol(QuicConnectionProtocol):
                 "seq_no": seq_no,
                 "timestamp": timestamp,  # Original timestamp from sender
                 "payload": data,  # Original data payload
+                "buffer_entry_time": buffer_entry_time,  # When packet entered buffer (or None)
             }
             try:
                 await self.on_message(formatted_data, reliable)
