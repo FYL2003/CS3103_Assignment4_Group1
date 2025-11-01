@@ -1,15 +1,19 @@
 import asyncio
 import json
+import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import List, Optional, Set
+from typing import Optional, Set
 
 from aioquic.asyncio import connect, serve
 from aioquic.quic.configuration import QuicConfiguration
 
 from GameServerProtocol import GameServerProtocol
 from generate_cert import ensure_certificates
+
+# Module-level logger
+logger = logging.getLogger(__name__)
 
 RELIABLE = 1
 UNRELIABLE = 0
@@ -61,8 +65,6 @@ class ChannelMetrics:
     def check_and_cleanup_seqs(self):
         """Check if sequence tracking set is too large and cleanup if needed"""
         if len(self.received_seqs) > MAX_SEQUENCE_TRACKING:
-            import logging
-            logger = logging.getLogger(__name__)
             logger.warning(
                 f"Sequence tracking exceeded {MAX_SEQUENCE_TRACKING} entries. "
                 "Clearing for memory management. PDR calculation may be affected."
