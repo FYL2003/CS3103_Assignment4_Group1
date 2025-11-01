@@ -1,6 +1,5 @@
 """
 H-QUIC Receiver Application (Server Mode)
-CS3103 Assignment 4 - Adaptive Hybrid Transport Protocol for Games
 
 This server receives packets from game clients using the H-QUIC protocol,
 tracks performance metrics, and displays comprehensive statistics.
@@ -81,7 +80,7 @@ class ReceiverApplication:
         self.keyfile = keyfile
 
         # Initialize GameNetAPI in SERVER mode
-        # Certificate generation is now handled inside GameNetAPI
+        # Certificate generation is handled inside GameNetAPI
         self.api = GameNetAPI(
             isClient=False,
             host=host,

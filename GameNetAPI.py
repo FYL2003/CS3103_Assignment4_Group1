@@ -41,14 +41,19 @@ class ChannelMetrics:
     - Cleanup occurs automatically on connection termination
     """
 
+    # Initialised values to 0
     packets_received: int = 0
     packets_delivered: int = 0
     bytes_received: int = 0
+    
+    # Set up bounded deques for RTT and jitter samples
     rtts: deque = field(default_factory=lambda: deque(maxlen=MAX_RTT_SAMPLES))
     jitter_samples: deque = field(default_factory=lambda: deque(maxlen=MAX_JITTER_SAMPLES))
+
+    # Other initialised values for tracking
     last_rtt: Optional[float] = None
     start_time: Optional[float] = None
-    last_seq: int = -1
+    last_seq: int = -1 # -1 indicates no packets received yet
     highest_seq: int = -1  # Track highest sequence number seen
     received_seqs: Set[int] = field(default_factory=set)  # Track all received sequence numbers for PDR calculation
 
