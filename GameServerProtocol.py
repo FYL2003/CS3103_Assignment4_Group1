@@ -10,10 +10,6 @@ from aioquic.quic.events import (
     StreamDataReceived,
 )
 
-RELIABLE = 1
-UNRELIABLE = 0
-
-RETRANSMISSION_TIMEOUT = 0.2  # 200 ms default
 TIMESTAMP_BYTES = 8
 
 logger = logging.getLogger(__name__)
@@ -22,7 +18,7 @@ logger = logging.getLogger(__name__)
 class GameServerProtocol(QuicConnectionProtocol):
     """
     QUIC protocol handler for game server
-    
+
     Callback Behavior:
     - on_message: Called for each received packet (runs in event loop)
     - on_connection_terminated: Called when connection ends (runs asynchronously)
@@ -30,19 +26,24 @@ class GameServerProtocol(QuicConnectionProtocol):
       Callbacks should complete quickly or handle their own async operations.
       Any exceptions are logged but do not affect protocol shutdown.
     """
+
     def __init__(self, *args, on_message=None, on_connection_terminated=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.reliable_buffer = {}  # seq_no -> packet
         self.expected_seq = 0  # next expected reliable seq
         self.on_message = on_message  # callback for received messages
-        self.on_connection_terminated = on_connection_terminated  # callback for connection termination
+        self.on_connection_terminated = (
+            on_connection_terminated  # callback for connection termination
+        )
 
     def _handle_callback_error(self, task):
         """Handle exceptions from connection termination callback"""
         try:
             task.result()
         except Exception as e:
-            logger.error(f"Error in connection termination callback: {e}", exc_info=True)
+            logger.error(
+                f"Error in connection termination callback: {e}", exc_info=True
+            )
 
     def quic_event_received(self, event):
         if isinstance(event, StreamDataReceived):

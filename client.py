@@ -1,7 +1,9 @@
 # client.py
 import asyncio
 import random
+
 from GameNetAPI import GameNetAPI
+
 
 def generate_game_data():
     """Generate random game data for testing."""
@@ -10,6 +12,7 @@ def generate_game_data():
     pos_y = random.uniform(0, 500)
     direction = random.choice([0, 90, 180, 270])
     return {"player_id": player_id, "pos_x": pos_x, "pos_y": pos_y, "dir": direction}
+
 
 async def main():
     # call the GameNetAPI to connect to the server
@@ -23,6 +26,7 @@ async def main():
         await asyncio.sleep(0.05)
 
     await api.close()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
