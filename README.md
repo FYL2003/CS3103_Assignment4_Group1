@@ -6,7 +6,7 @@ This project implements H-QUIC (Hybrid QUIC), an adaptive hybrid transport proto
 
 ## Dependencies
 - `aioquic` >= 0.9.20
-- `cryptography` >= 41.0.0
+- `cryptography` >= 42.0.0
 
 To install dependencies, run:
 ```bash
