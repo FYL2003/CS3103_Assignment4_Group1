@@ -191,6 +191,9 @@ class ReceiverApplication:
         self.delivered_packets.clear()
         self.packet_arrival_times.clear()
         self.packet_send_times.clear()
+        
+        # Explicitly reset all metrics for next connection
+        self.api.reset_all_metrics()
 
         logger.info("")
         logger.info("=" * 100)
@@ -270,10 +273,6 @@ class ReceiverApplication:
         In a real game, this would update game state, render graphics, etc.
         """
         delivery_time = time.time()
-
-        # Calculate buffering delay
-        buffering_delay_ms = (delivery_time - arrival_time) * 1000
-        total_delay_ms = (delivery_time - timestamp) * 1000
 
         # Update metrics
         metrics = self.api.metrics[channel]

@@ -38,7 +38,16 @@ class GameServerProtocol(QuicConnectionProtocol):
         self.on_connection_terminated = on_connection_terminated  # callback for connection termination
 
     def _handle_callback_error(self, task):
-        """Handle exceptions from connection termination callback"""
+        """
+        Handle exceptions from connection termination callback.
+        
+        This method is called as a callback handler for async tasks created
+        in the connection termination flow. It catches and logs any exceptions
+        that occur during the on_connection_terminated callback execution.
+        
+        Args:
+            task: The completed asyncio.Task to check for exceptions
+        """
         try:
             task.result()
         except Exception as e:

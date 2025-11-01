@@ -41,7 +41,7 @@ class ChannelMetrics:
     - Cleanup occurs automatically on connection termination
     """
 
-    # Initialised values to 0
+    # Initialized values to 0
     packets_received: int = 0
     packets_delivered: int = 0
     bytes_received: int = 0
@@ -50,7 +50,7 @@ class ChannelMetrics:
     rtts: deque = field(default_factory=lambda: deque(maxlen=MAX_RTT_SAMPLES))
     jitter_samples: deque = field(default_factory=lambda: deque(maxlen=MAX_JITTER_SAMPLES))
 
-    # Other initialised values for tracking
+    # Other initialized values for tracking
     last_rtt: Optional[float] = None
     start_time: Optional[float] = None
     last_seq: int = -1 # -1 indicates no packets received yet
