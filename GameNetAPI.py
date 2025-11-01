@@ -77,6 +77,7 @@ class ChannelMetrics:
             self.received_seqs.clear()
             # Reset tracking variables
             self.highest_seq = -1
+            self.packets_received = 0
     
     def clear_buffers(self):
         """Clear all buffers - called on connection termination"""
