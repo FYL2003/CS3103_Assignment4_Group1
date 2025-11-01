@@ -169,6 +169,7 @@ class ReceiverApplication:
             timestamp=timestamp,
             arrival_time=metrics_data["arrival_time"],
             rtt_ms=metrics_data["rtt_ms"],
+            buffering_delay_ms=metrics_data["buffering_delay_ms"],
             payload=payload,
             out_of_order=metrics_data["out_of_order"],
         )
@@ -263,6 +264,7 @@ class ReceiverApplication:
         timestamp: float,
         arrival_time: float,
         rtt_ms: float,
+        buffering_delay_ms: float,
         payload: dict,
         out_of_order: bool,
     ):
@@ -273,6 +275,9 @@ class ReceiverApplication:
         In a real game, this would update game state, render graphics, etc.
         """
         delivery_time = time.time()
+
+        # Calculate total delay (RTT + buffering delay)
+        total_delay_ms = rtt_ms + buffering_delay_ms
 
         # Update metrics
         metrics = self.api.metrics[channel]
