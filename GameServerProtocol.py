@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import time
 
 from aioquic.asyncio.protocol import QuicConnectionProtocol
@@ -15,19 +16,26 @@ UNRELIABLE = 0
 RETRANSMISSION_TIMEOUT = 0.2  # 200 ms default
 TIMESTAMP_BYTES = 8
 
+logger = logging.getLogger(__name__)
+
 
 class GameServerProtocol(QuicConnectionProtocol):
     def __init__(self, *args, on_message=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.reliable_buffer = {}  # seq_no -> packet
+        self.reliable_buffer = {}  # seq_no -> (data, timestamp)
         self.expected_seq = 0  # next expected reliable seq
         self.next_ack_seq = 0  # seq for server -> client packets
         self.on_message = on_message  # callback for received messages
+        self.packet_timestamps = {}  # seq_no -> time when packet entered buffer
+        self._timeout_task = None  # Task for checking packet timeouts
 
     def quic_event_received(self, event):
         if isinstance(event, StreamDataReceived):
             # schedule async handler
             asyncio.create_task(self._handle_packet(event.data, reliable=True))
+            # Start timeout checker if not already running
+            if self._timeout_task is None or self._timeout_task.done():
+                self._timeout_task = asyncio.create_task(self._check_timeouts())
             if event.end_stream:
                 # reset the stream if the peer closed it
                 try:
@@ -40,6 +48,9 @@ class GameServerProtocol(QuicConnectionProtocol):
 
         elif isinstance(event, ConnectionTerminated):
             print("Connection terminated by client")
+            # Cancel timeout task if running
+            if self._timeout_task and not self._timeout_task.done():
+                self._timeout_task.cancel()
 
     async def _handle_packet(self, packet: bytes, reliable: bool):
         # header: 1 byte channel | 2 bytes seq_no | 8 bytes timestamp
@@ -60,8 +71,9 @@ class GameServerProtocol(QuicConnectionProtocol):
             return
 
         if reliable:
-            # buffer and reorder
+            # buffer and reorder - track when packet enters buffer
             self.reliable_buffer[seq_no] = (data, timestamp)
+            self.packet_timestamps[seq_no] = time.time()  # Track for timeout checking
             await self._deliver_reliable()
         else:
             # deliver immediately
@@ -69,10 +81,54 @@ class GameServerProtocol(QuicConnectionProtocol):
                 data, reliable=False, seq_no=seq_no, timestamp=timestamp
             )
 
+    async def _check_timeouts(self):
+        """
+        Periodically check for packets that have exceeded RETRANSMISSION_TIMEOUT.
+        Skip timed-out packets and deliver subsequent in-order packets.
+        
+        Per assignment requirement (e): "If any packet is lost and retransmission 
+        is not reached by t milliseconds threshold, you should skip that packet 
+        and display rest of the data."
+        """
+        try:
+            while True:
+                await asyncio.sleep(0.05)  # Check every 50ms
+                
+                current_time = time.time()
+                
+                # Check if expected packet has timed out
+                if self.expected_seq in self.packet_timestamps:
+                    entry_time = self.packet_timestamps[self.expected_seq]
+                    elapsed_time = current_time - entry_time
+                    
+                    if elapsed_time > RETRANSMISSION_TIMEOUT:
+                        # Packet timed out - skip it
+                        logger.warning(
+                            f"Packet {self.expected_seq} timed out after {elapsed_time*1000:.1f}ms. "
+                            f"Skipping and delivering subsequent packets."
+                        )
+                        
+                        # Remove timed-out packet from tracking
+                        self.packet_timestamps.pop(self.expected_seq, None)
+                        self.reliable_buffer.pop(self.expected_seq, None)
+                        
+                        # Advance expected sequence number
+                        self.expected_seq += 1
+                        
+                        # Try to deliver subsequent packets that arrived
+                        await self._deliver_reliable()
+        except asyncio.CancelledError:
+            # Task cancelled during shutdown - normal behavior
+            pass
+        except Exception as e:
+            logger.error(f"Error in timeout checker: {e}", exc_info=True)
+
     async def _deliver_reliable(self):
         # deliver all in-order packets
         while self.expected_seq in self.reliable_buffer:
             data, ts = self.reliable_buffer.pop(self.expected_seq)
+            # Remove from timeout tracking
+            self.packet_timestamps.pop(self.expected_seq, None)
             await self._deliver_packet(
                 data, reliable=True, seq_no=self.expected_seq, timestamp=ts
             )
