@@ -181,13 +181,14 @@ class GameNetAPI:
     async def _receive_loop(self):
         """Continuously read incoming stream and datagram data."""
         while self.connected:
-            # Iterate through all streams
-            for stream_id, stream in self.conn._quic._streams.items():
-                # Read any available data
-                if stream.buffer:
-                    data = stream.buffer
-                    stream.buffer = b""
-                    await self._process_incoming_data(data)
+            # Process incoming events
+            for event in self.conn._quic.events():
+                # Stream data received
+                if isinstance(event, StreamDataReceived):
+                    await self._process_incoming_data(event.data)
+                # Handle stream reset or other events if needed
+                # e.g., if isinstance(event, StreamReset):
+                #       handle_stream_reset(event)
 
             # Process incoming datagrams (for UNRELIABLE)
             if hasattr(self.conn._quic, "datagrams"):
