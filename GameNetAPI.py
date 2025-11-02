@@ -13,7 +13,7 @@ from generate_cert import ensure_certificates
 
 RELIABLE = 1
 UNRELIABLE = 0
-RETRANSMISSION_TIMEOUT = 0.2  # 200 ms default
+RETRANSMISSION_TIMEOUT = 0.2  # seconds
 
 
 class GameNetAPI:
@@ -26,7 +26,7 @@ class GameNetAPI:
         self.conn = None
         self._connect_ctx = None
 
-        # QUIC config
+        # QUIC configuration
         self.config = QuicConfiguration(
             is_client=is_client, alpn_protocols=["GameNetAPI"]
         )
@@ -43,9 +43,13 @@ class GameNetAPI:
         self.next_expected_seq = 0
 
         # Buffers
-        self.reliable_send_buffer: Dict[int, Dict] = {}
-        self.reliable_receive_buffer: Dict[int, Tuple[dict, float, float]] = {}
-        self.stream_buffers: Dict[int, bytearray] = {}
+        self.reliable_send_buffer: Dict[int, Dict] = (
+            {}
+        )  # seq_no -> {"packet": bytes, "sent_time": float}
+        self.reliable_receive_buffer: Dict[int, Tuple[dict, float, float]] = (
+            {}
+        )  # seq_no -> (payload, timestamp, arrival_time)
+        self.stream_buffers: Dict[int, bytearray] = {}  # stream_id -> partial data
 
         # Server metrics
         if not is_client:
@@ -59,7 +63,7 @@ class GameNetAPI:
             certfile, keyfile = self._ensure_certificates(certfile, keyfile)
             self.config.load_cert_chain(certfile=certfile, keyfile=keyfile)
 
-        # Datagram
+        # Datagram support
         if hasattr(self.config, "max_datagram_frame_size"):
             self.config.max_datagram_frame_size = 65536
         else:
@@ -76,24 +80,22 @@ class GameNetAPI:
     def _ensure_certificates(self, certfile, keyfile):
         return ensure_certificates(certfile, keyfile)
 
-    # ----------------------- CONNECTION -----------------------
+    # ---------------- CONNECTION ----------------
     async def connect(self):
         if not self.is_client:
             raise RuntimeError("connect() only for client")
-
         self._connect_ctx = connect(self.host, self.port, configuration=self.config)
         self.conn = await self._connect_ctx.__aenter__()
         self.connected = True
         self.running = True
 
-        # Start background retransmission task
+        # Start retransmission task
         self.retransmission_task = asyncio.create_task(self._retransmission_loop())
         print(f"Connected to QUIC server {self.host}:{self.port}")
 
     async def start_server(self):
         if self.is_client:
             raise RuntimeError("start_server() only for server")
-
         await serve(
             host=self.host,
             port=self.port,
@@ -108,7 +110,7 @@ class GameNetAPI:
         print(f"Server running on {self.host}:{self.port}")
         await asyncio.Event().wait()
 
-    # ----------------------- SENDING -----------------------
+    # ---------------- SENDING ----------------
     async def send(self, data: dict, reliable: bool = True):
         if not self.connected:
             raise RuntimeError("Not connected")
@@ -154,31 +156,22 @@ class GameNetAPI:
         self.conn.transmit()
         print(f"[UNRELIABLE] Sent seq {seq_no}: {data}")
 
-    # ----------------------- RETRANSMISSION -----------------------
+    # ---------------- RETRANSMISSION ----------------
     async def _retransmission_loop(self):
         while self.connected:
             now = time.time()
-            to_delete = []
-
             for seq_no, entry in self.reliable_send_buffer.items():
                 elapsed = now - entry["sent_time"]
-                if elapsed > RETRANSMISSION_TIMEOUT:
-                    print(
-                        f"[RELIABLE] Skipping seq {seq_no} after {RETRANSMISSION_TIMEOUT*1000}ms"
-                    )
-                    to_delete.append(seq_no)
-                else:
+                if elapsed >= RETRANSMISSION_TIMEOUT:
+                    # retransmit
                     stream_id = self.conn._quic.get_next_available_stream_id()
                     self.conn._quic.send_stream_data(stream_id, entry["packet"])
                     self.conn.transmit()
+                    entry["sent_time"] = now  # update sent time after retransmission
                     print(f"[RELIABLE] Retransmitting seq {seq_no}")
-
-            for seq_no in to_delete:
-                del self.reliable_send_buffer[seq_no]
-
             await asyncio.sleep(0.05)
 
-    # ----------------------- RECEIVING -----------------------
+    # ---------------- RECEIVING ----------------
     async def handle_quic_event(self, event):
         if isinstance(event, StreamDataReceived):
             await self._handle_stream_data(event.stream_id, event.data)
@@ -240,7 +233,7 @@ class GameNetAPI:
             print(f"[RELIABLE] Received ACK for seq {seq_no}")
             del self.reliable_send_buffer[seq_no]
 
-    # ----------------------- CONNECTION CLOSE -----------------------
+    # ---------------- CONNECTION CLOSE ----------------
     async def close(self):
         self.running = False
         self.connected = False
@@ -250,7 +243,7 @@ class GameNetAPI:
             await self._connect_ctx.__aexit__(None, None, None)
         print("Connection closed")
 
-    # ----------------------- CALLBACKS -----------------------
+    # ---------------- CALLBACKS ----------------
     def set_message_callback(self, callback: Callable[[dict, bool], asyncio.Future]):
         self.on_message = callback
 
