@@ -38,8 +38,18 @@ class GameNetAPI:
         self.on_message: Optional[Callable[[dict, bool], asyncio.Future]] = None
         self.on_connection_terminated: Optional[Callable[[], asyncio.Future]] = None
 
-        # Sequence numbers
-        self.seq = {RELIABLE: 0, UNRELIABLE: 0}
+        # Reliable sequence numbers
+        self.next_reliable_seq = 0
+        self.next_expected_seq = 0
+
+        # Buffers
+        self.reliable_send_buffer: Dict[int, Dict] = (
+            {}
+        )  # seq -> {"packet", "sent_time"}
+        self.reliable_receive_buffer: Dict[int, Tuple[dict, float, float]] = (
+            {}
+        )  # seq -> (payload, timestamp, arrival_time)
+        self.stream_buffers: Dict[int, bytearray] = {}  # For partial stream data
 
         # Server metrics
         if not is_client:
@@ -62,40 +72,12 @@ class GameNetAPI:
             except Exception:
                 pass
 
-        # Reliable packet tracking
-        self.reliable_send_buffer: Dict[int, Dict] = (
-            {}
-        )  # seq -> {"packet", "sent_time"}
-        self.reliable_receive_buffer: Dict[int, Tuple[dict, float, float]] = (
-            {}
-        )  # seq -> (payload, timestamp, arrival_time)
-        self.next_reliable_seq = 0
-        self.next_expected_seq = 0
-
+        # Tasks and state
         self.retransmission_task = None
         self.receive_task = None
         self.connected = False
+        self.running = False
 
-    
-    async def _get_udp_packet(self):
-        """
-        Async helper to receive a UDP packet.
-        Returns (data, addr)
-        """
-        fut = self.loop.create_future()
-
-        class ReceiverProtocol(asyncio.DatagramProtocol):
-            def datagram_received(self, data, addr):
-                if not fut.done():
-                    fut.set_result((data, addr))
-
-        transport, _ = await self.loop.create_datagram_endpoint(
-            lambda: ReceiverProtocol(),
-            local_addr=self.local_addr
-        )
-        data, addr = await fut
-        transport.close()
-        return data, addr
     def _ensure_certificates(self, certfile, keyfile):
         return ensure_certificates(certfile, keyfile)
 
@@ -107,8 +89,9 @@ class GameNetAPI:
         self._connect_ctx = connect(self.host, self.port, configuration=self.config)
         self.conn = await self._connect_ctx.__aenter__()
         self.connected = True
+        self.running = True
 
-        # Start loops
+        # Start background loops
         self.retransmission_task = asyncio.create_task(self._retransmission_loop())
         self.receive_task = asyncio.create_task(self._receive_loop())
 
@@ -163,7 +146,7 @@ class GameNetAPI:
         self.next_reliable_seq += 1
 
     async def _send_unreliable(self, data: dict):
-        seq_no = self.seq[UNRELIABLE]
+        seq_no = self.next_reliable_seq  # Reuse counter for simplicity
         timestamp = int(time.time() * 1000)
         payload_bytes = json.dumps(data).encode()
         header = (
@@ -175,7 +158,6 @@ class GameNetAPI:
         self.conn._quic.send_datagram_frame(packet_bytes)
         self.conn.transmit()
         print(f"[UNRELIABLE] Sent seq {seq_no}: {data}")
-        self.seq[UNRELIABLE] += 1
 
     # ----------------------- RETRANSMISSION -----------------------
     async def _retransmission_loop(self):
@@ -202,76 +184,72 @@ class GameNetAPI:
             await asyncio.sleep(0.05)
 
     # ----------------------- RECEIVING -----------------------
-
-    
     async def _receive_loop(self):
-        """
-        Asynchronous loop to receive UDP datagrams and process QUIC events.
-        """
         while self.running:
             try:
-                # Receive raw UDP datagram
-                data, addr = await asyncio.get_event_loop().sock_recvfrom(self.udp_socket, 65535)
-
-                # Feed datagram into QuicConnection
-                events = self.conn._quic.receive_datagram(data, addr, now=time.time())
-
-                # Process events
-                for event in events:
+                events = (
+                    self.conn._quic.handle_timer()
+                )  # Ensure QUIC internal timers are processed
+                for event in self.conn._quic.events():
                     if isinstance(event, StreamDataReceived):
-                        stream_id = event.stream_id
-                        stream_data = event.data
-                        self.handle_stream_data(stream_id, stream_data)
-
+                        await self._handle_stream_data(event.stream_id, event.data)
                     elif isinstance(event, ConnectionTerminated):
-                        print(f"Connection terminated: {event.error_code} {event.frame_type}")
+                        print(
+                            f"Connection terminated: {event.error_code} {event.frame_type}"
+                        )
                         self.running = False
-
+                await asyncio.sleep(0.01)
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 print(f"Receive loop error: {e}")
 
-    async def _process_packet(self, packet_bytes: bytes):
-        channel = packet_bytes[0]
-        seq_no = int.from_bytes(packet_bytes[1:3], "big")
-        timestamp = int.from_bytes(packet_bytes[3:11], "big") / 1000.0
-        payload = json.loads(packet_bytes[11:])
+    async def _handle_stream_data(self, stream_id: int, data: bytes):
+        buf = self.stream_buffers.setdefault(stream_id, bytearray())
+        buf.extend(data)
 
-        if channel == RELIABLE:
-            self.reliable_receive_buffer[seq_no] = (payload, timestamp, time.time())
-            await self._send_ack(seq_no)
-            await self._deliver_in_order()
-        elif channel == UNRELIABLE and self.on_message:
-            await self.on_message(payload, False)
+        try:
+            while buf:
+                # Minimum header size: 1 + 2 + 8 = 11
+                if len(buf) < 11:
+                    return
+                channel = buf[0]
+                seq_no = int.from_bytes(buf[1:3], "big")
+                timestamp = int.from_bytes(buf[3:11], "big") / 1000.0
+                payload_bytes = buf[11:]
+                try:
+                    payload = json.loads(payload_bytes)
+                except json.JSONDecodeError:
+                    # Incomplete JSON, wait for more data
+                    return
+
+                # Remove processed data
+                buf.clear()
+
+                if channel == RELIABLE:
+                    if "ack" in payload:
+                        await self.on_receive_ack(payload)
+                    else:
+                        self.reliable_receive_buffer[seq_no] = (
+                            payload,
+                            timestamp,
+                            time.time(),
+                        )
+                        await self._send_ack(seq_no)
+                        await self._deliver_in_order()
+                elif channel == UNRELIABLE and self.on_message:
+                    await self.on_message(payload, False)
+        except Exception as e:
+            print(f"[ERROR] Handling stream data: {e}")
 
     async def _deliver_in_order(self):
         while self.next_expected_seq in self.reliable_receive_buffer:
-            payload, timestamp, arrival_time = self.reliable_receive_buffer.pop(
+            payload, timestamp, _ = self.reliable_receive_buffer.pop(
                 self.next_expected_seq
             )
             if self.on_message:
                 await self.on_message(payload, True)
             self.next_expected_seq += 1
-
-    async def _skip_timedout_packets(self):
-        now = time.time()
-        skipped = False
-        while self.next_expected_seq in self.reliable_receive_buffer:
-            payload, timestamp, arrival_time = self.reliable_receive_buffer[
-                self.next_expected_seq
-            ]
-            if now - arrival_time > RETRANSMISSION_TIMEOUT:
-                print(
-                    f"[RELIABLE] Skipping seq {self.next_expected_seq} after {RETRANSMISSION_TIMEOUT*1000}ms"
-                )
-                self.reliable_receive_buffer.pop(self.next_expected_seq)
-                self.next_expected_seq += 1
-                skipped = True
-            else:
-                break
-        if skipped:
-            await self._deliver_in_order()
 
     async def _send_ack(self, seq_no: int):
         ack_packet = json.dumps({"ack": seq_no}).encode()
@@ -290,6 +268,7 @@ class GameNetAPI:
     async def close(self):
         if not self.connected:
             return
+        self.running = False
         if self.retransmission_task:
             self.retransmission_task.cancel()
         if self.receive_task:
