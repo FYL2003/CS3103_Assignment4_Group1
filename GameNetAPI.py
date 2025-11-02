@@ -26,7 +26,7 @@ class GameNetAPI:
         self.conn = None
         self._connect_ctx = None
 
-        # QUIC configuration
+        # QUIC config
         self.config = QuicConfiguration(
             is_client=is_client, alpn_protocols=["GameNetAPI"]
         )
@@ -38,18 +38,14 @@ class GameNetAPI:
         self.on_message: Optional[Callable[[dict, bool], asyncio.Future]] = None
         self.on_connection_terminated: Optional[Callable[[], asyncio.Future]] = None
 
-        # Reliable sequence numbers
+        # Sequence numbers
         self.next_reliable_seq = 0
         self.next_expected_seq = 0
 
         # Buffers
-        self.reliable_send_buffer: Dict[int, Dict] = (
-            {}
-        )  # seq -> {"packet", "sent_time"}
-        self.reliable_receive_buffer: Dict[int, Tuple[dict, float, float]] = (
-            {}
-        )  # seq -> (payload, timestamp, arrival_time)
-        self.stream_buffers: Dict[int, bytearray] = {}  # For partial stream data
+        self.reliable_send_buffer: Dict[int, Dict] = {}
+        self.reliable_receive_buffer: Dict[int, Tuple[dict, float, float]] = {}
+        self.stream_buffers: Dict[int, bytearray] = {}
 
         # Server metrics
         if not is_client:
@@ -63,7 +59,7 @@ class GameNetAPI:
             certfile, keyfile = self._ensure_certificates(certfile, keyfile)
             self.config.load_cert_chain(certfile=certfile, keyfile=keyfile)
 
-        # Datagram support
+        # Datagram
         if hasattr(self.config, "max_datagram_frame_size"):
             self.config.max_datagram_frame_size = 65536
         else:
@@ -74,7 +70,6 @@ class GameNetAPI:
 
         # Tasks and state
         self.retransmission_task = None
-        self.receive_task = None
         self.connected = False
         self.running = False
 
@@ -91,15 +86,14 @@ class GameNetAPI:
         self.connected = True
         self.running = True
 
-        # Start background loops
+        # Start background retransmission task
         self.retransmission_task = asyncio.create_task(self._retransmission_loop())
-        self.receive_task = asyncio.create_task(self._receive_loop())
-
         print(f"Connected to QUIC server {self.host}:{self.port}")
 
     async def start_server(self):
         if self.is_client:
             raise RuntimeError("start_server() only for server")
+
         await serve(
             host=self.host,
             port=self.port,
@@ -146,7 +140,7 @@ class GameNetAPI:
         self.next_reliable_seq += 1
 
     async def _send_unreliable(self, data: dict):
-        seq_no = self.next_reliable_seq  # Reuse counter for simplicity
+        seq_no = self.next_reliable_seq
         timestamp = int(time.time() * 1000)
         payload_bytes = json.dumps(data).encode()
         header = (
@@ -155,6 +149,7 @@ class GameNetAPI:
             + timestamp.to_bytes(8, "big")
         )
         packet_bytes = header + payload_bytes
+
         self.conn._quic.send_datagram_frame(packet_bytes)
         self.conn.transmit()
         print(f"[UNRELIABLE] Sent seq {seq_no}: {data}")
@@ -184,69 +179,50 @@ class GameNetAPI:
             await asyncio.sleep(0.05)
 
     # ----------------------- RECEIVING -----------------------
-    async def _receive_loop(self):
-        while self.running:
-            try:
-                events = (
-                    self.conn._quic.handle_timer()
-                )  # Ensure QUIC internal timers are processed
-                for event in self.conn._quic.events():
-                    if isinstance(event, StreamDataReceived):
-                        await self._handle_stream_data(event.stream_id, event.data)
-                    elif isinstance(event, ConnectionTerminated):
-                        print(
-                            f"Connection terminated: {event.error_code} {event.frame_type}"
-                        )
-                        self.running = False
-                await asyncio.sleep(0.01)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                print(f"Receive loop error: {e}")
+    async def handle_quic_event(self, event):
+        if isinstance(event, StreamDataReceived):
+            await self._handle_stream_data(event.stream_id, event.data)
+        elif isinstance(event, ConnectionTerminated):
+            print(f"Connection terminated: {event.error_code} {event.frame_type}")
+            self.running = False
+            if self.on_connection_terminated:
+                await self.on_connection_terminated()
 
     async def _handle_stream_data(self, stream_id: int, data: bytes):
         buf = self.stream_buffers.setdefault(stream_id, bytearray())
         buf.extend(data)
 
-        try:
-            while buf:
-                # Minimum header size: 1 + 2 + 8 = 11
-                if len(buf) < 11:
-                    return
-                channel = buf[0]
-                seq_no = int.from_bytes(buf[1:3], "big")
-                timestamp = int.from_bytes(buf[3:11], "big") / 1000.0
-                payload_bytes = buf[11:]
-                try:
-                    payload = json.loads(payload_bytes)
-                except json.JSONDecodeError:
-                    # Incomplete JSON, wait for more data
-                    return
+        while True:
+            if len(buf) < 11:
+                return  # wait for more data
+            channel = buf[0]
+            seq_no = int.from_bytes(buf[1:3], "big")
+            timestamp = int.from_bytes(buf[3:11], "big") / 1000.0
+            payload_bytes = buf[11:]
+            try:
+                payload = json.loads(payload_bytes)
+            except json.JSONDecodeError:
+                return  # incomplete JSON, wait for more
 
-                # Remove processed data
-                buf.clear()
+            buf.clear()  # processed
 
-                if channel == RELIABLE:
-                    if "ack" in payload:
-                        await self.on_receive_ack(payload)
-                    else:
-                        self.reliable_receive_buffer[seq_no] = (
-                            payload,
-                            timestamp,
-                            time.time(),
-                        )
-                        await self._send_ack(seq_no)
-                        await self._deliver_in_order()
-                elif channel == UNRELIABLE and self.on_message:
-                    await self.on_message(payload, False)
-        except Exception as e:
-            print(f"[ERROR] Handling stream data: {e}")
+            if channel == RELIABLE:
+                if "ack" in payload:
+                    await self.on_receive_ack(payload)
+                else:
+                    self.reliable_receive_buffer[seq_no] = (
+                        payload,
+                        timestamp,
+                        time.time(),
+                    )
+                    await self._send_ack(seq_no)
+                    await self._deliver_in_order()
+            elif channel == UNRELIABLE and self.on_message:
+                await self.on_message(payload, False)
 
     async def _deliver_in_order(self):
         while self.next_expected_seq in self.reliable_receive_buffer:
-            payload, timestamp, _ = self.reliable_receive_buffer.pop(
-                self.next_expected_seq
-            )
+            payload, _, _ = self.reliable_receive_buffer.pop(self.next_expected_seq)
             if self.on_message:
                 await self.on_message(payload, True)
             self.next_expected_seq += 1
@@ -266,15 +242,12 @@ class GameNetAPI:
 
     # ----------------------- CONNECTION CLOSE -----------------------
     async def close(self):
-        if not self.connected:
-            return
         self.running = False
+        self.connected = False
         if self.retransmission_task:
             self.retransmission_task.cancel()
-        if self.receive_task:
-            self.receive_task.cancel()
-        await self._connect_ctx.__aexit__(None, None, None)
-        self.connected = False
+        if self._connect_ctx:
+            await self._connect_ctx.__aexit__(None, None, None)
         print("Connection closed")
 
     # ----------------------- CALLBACKS -----------------------
