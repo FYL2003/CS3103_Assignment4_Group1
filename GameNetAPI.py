@@ -5,6 +5,7 @@ from typing import Callable, Dict, Optional, Tuple
 
 from aioquic.asyncio import connect, serve
 from aioquic.quic.configuration import QuicConfiguration
+from aioquic.quic.events import ConnectionTerminated, StreamDataReceived
 
 from ChannelMetrics import ChannelMetrics
 from GameServerProtocol import GameServerProtocol
@@ -64,11 +65,15 @@ class GameNetAPI:
         # Reliable packet tracking
         self.reliable_send_buffer: Dict[int, Dict] = (
             {}
-        )  # seq -> {"packet", "timestamp", "payload"}
+        )  # seq -> {"packet", "sent_time"}
+        self.reliable_receive_buffer: Dict[int, Tuple[dict, float, float]] = (
+            {}
+        )  # seq -> (payload, timestamp, arrival_time)
         self.next_reliable_seq = 0
-        self.reliable_receive_buffer: Dict[int, Tuple[dict, float]] = {}
         self.next_expected_seq = 0
+
         self.retransmission_task = None
+        self.receive_task = None
         self.connected = False
 
     def _ensure_certificates(self, certfile, keyfile):
@@ -83,7 +88,7 @@ class GameNetAPI:
         self.conn = await self._connect_ctx.__aenter__()
         self.connected = True
 
-        # Start retransmission and receive loops
+        # Start loops
         self.retransmission_task = asyncio.create_task(self._retransmission_loop())
         self.receive_task = asyncio.create_task(self._receive_loop())
 
@@ -116,14 +121,9 @@ class GameNetAPI:
             await self._send_unreliable(data)
 
     async def _send_reliable(self, data: dict):
-        """
-        Send a reliable packet with sequence number and timestamp in header only.
-        """
         seq_no = self.next_reliable_seq
-        timestamp = int(time.time() * 1000)  # milliseconds
+        timestamp = int(time.time() * 1000)
         payload_bytes = json.dumps(data).encode()
-
-        # Header: [channel (1) | seq_no (2) | timestamp (8)]
         header = (
             RELIABLE.to_bytes(1, "big")
             + seq_no.to_bytes(2, "big")
@@ -131,100 +131,120 @@ class GameNetAPI:
         )
         packet_bytes = header + payload_bytes
 
-        # Buffer packet for retransmission
         self.reliable_send_buffer[seq_no] = {
             "packet": packet_bytes,
-            "sent_time": time.time(),  # for retransmission timing
+            "sent_time": time.time(),
         }
 
-        # Send via QUIC stream
         stream_id = self.conn._quic.get_next_available_stream_id()
         self.conn._quic.send_stream_data(stream_id, packet_bytes)
         self.conn.transmit()
-
         print(f"[RELIABLE] Sent seq {seq_no}: {data}")
         self.next_reliable_seq += 1
 
     async def _send_unreliable(self, data: dict):
         seq_no = self.seq[UNRELIABLE]
         timestamp = int(time.time() * 1000)
-        payload = json.dumps(data)
+        payload_bytes = json.dumps(data).encode()
         header = (
             UNRELIABLE.to_bytes(1, "big")
             + seq_no.to_bytes(2, "big")
             + timestamp.to_bytes(8, "big")
         )
-        packet_bytes = header + payload.encode()
+        packet_bytes = header + payload_bytes
         self.conn._quic.send_datagram_frame(packet_bytes)
         self.conn.transmit()
-        print(f"[UNRELIABLE] Sent seq {seq_no}: {payload}")
+        print(f"[UNRELIABLE] Sent seq {seq_no}: {data}")
         self.seq[UNRELIABLE] += 1
 
     # ----------------------- RETRANSMISSION -----------------------
-
-    async def _check_retransmissions(self):
-        now = time.time()
-        for seq_no, (packet_bytes, sent_time) in list(
-            self.reliable_send_buffer.items()
-        ):
-            if now - sent_time > RETRANSMISSION_TIMEOUT:
-                print(f"[RELIABLE] Skipping seq {seq_no} after timeout")
-                del self.reliable_send_buffer[seq_no]  # remove from buffer
-                # Optionally notify receiver that this packet is skipped
-
     async def _retransmission_loop(self):
         while self.connected:
-            await self._check_retransmissions()
+            now = time.time()
+            to_delete = []
+
+            for seq_no, entry in self.reliable_send_buffer.items():
+                elapsed = now - entry["sent_time"]
+                if elapsed > RETRANSMISSION_TIMEOUT:
+                    print(
+                        f"[RELIABLE] Skipping seq {seq_no} after {RETRANSMISSION_TIMEOUT*1000}ms"
+                    )
+                    to_delete.append(seq_no)
+                else:
+                    stream_id = self.conn._quic.get_next_available_stream_id()
+                    self.conn._quic.send_stream_data(stream_id, entry["packet"])
+                    self.conn.transmit()
+                    print(f"[RELIABLE] Retransmitting seq {seq_no}")
+
+            for seq_no in to_delete:
+                del self.reliable_send_buffer[seq_no]
+
             await asyncio.sleep(0.05)
 
     # ----------------------- RECEIVING -----------------------
     async def _receive_loop(self):
-        """Continuously read incoming stream and datagram data."""
         while self.connected:
-            # Process incoming events
-            for event in self.conn._quic.events():
-                # Stream data received
-                if isinstance(event, StreamDataReceived):
-                    await self._process_incoming_data(event.data)
-                # Handle stream reset or other events if needed
-                # e.g., if isinstance(event, StreamReset):
-                #       handle_stream_reset(event)
+            try:
+                data, addr = (
+                    await self._get_udp_packet()
+                )  # implement according to aioquic socket
+                events = self.conn._quic.receive_datagram(data, addr, now=time.time())
 
-            # Process incoming datagrams (for UNRELIABLE)
-            if hasattr(self.conn._quic, "datagrams"):
-                while self.conn._quic.datagrams:
-                    datagram = self.conn._quic.datagrams.pop(0)
-                    await self._process_incoming_data(datagram)
+                for event in events:
+                    if isinstance(event, StreamDataReceived):
+                        await self._process_packet(event.data)
+                    elif isinstance(event, ConnectionTerminated):
+                        print(f"Connection terminated: {event.error_code}")
+                        self.connected = False
 
-            await asyncio.sleep(0.01)
+                await self._skip_timedout_packets()
 
-    async def _process_incoming_data(self, packet_bytes: bytes):
-        """Process received bytes and distinguish between ACK and normal packets."""
-        try:
-            # First, try to decode as ACK
-            payload = json.loads(packet_bytes)
-            if isinstance(payload, dict) and "ack" in payload:
-                await self.on_receive_ack(payload)
-                return
-        except (json.JSONDecodeError, TypeError):
-            pass
+            except Exception as e:
+                print(f"Receive loop error: {e}")
+            await asyncio.sleep(0.005)
 
-        # Otherwise, treat as normal packet
+    async def _process_packet(self, packet_bytes: bytes):
         channel = packet_bytes[0]
         seq_no = int.from_bytes(packet_bytes[1:3], "big")
         timestamp = int.from_bytes(packet_bytes[3:11], "big") / 1000.0
         payload = json.loads(packet_bytes[11:])
 
         if channel == RELIABLE:
-            # Buffer for in-order delivery
             self.reliable_receive_buffer[seq_no] = (payload, timestamp, time.time())
             await self._send_ack(seq_no)
             await self._deliver_in_order()
         elif channel == UNRELIABLE and self.on_message:
             await self.on_message(payload, False)
 
+    async def _deliver_in_order(self):
+        while self.next_expected_seq in self.reliable_receive_buffer:
+            payload, timestamp, arrival_time = self.reliable_receive_buffer.pop(
+                self.next_expected_seq
+            )
+            if self.on_message:
+                await self.on_message(payload, True)
+            self.next_expected_seq += 1
+
+    async def _skip_timedout_packets(self):
+        now = time.time()
+        skipped = False
+        while self.next_expected_seq in self.reliable_receive_buffer:
+            payload, timestamp, arrival_time = self.reliable_receive_buffer[
+                self.next_expected_seq
+            ]
+            if now - arrival_time > RETRANSMISSION_TIMEOUT:
+                print(
+                    f"[RELIABLE] Skipping seq {self.next_expected_seq} after {RETRANSMISSION_TIMEOUT*1000}ms"
+                )
+                self.reliable_receive_buffer.pop(self.next_expected_seq)
+                self.next_expected_seq += 1
+                skipped = True
+            else:
+                break
+        if skipped:
+            await self._deliver_in_order()
+
     async def _send_ack(self, seq_no: int):
-        """Send ACK for received reliable packet."""
         ack_packet = json.dumps({"ack": seq_no}).encode()
         stream_id = self.conn._quic.get_next_available_stream_id()
         self.conn._quic.send_stream_data(stream_id, ack_packet)
@@ -232,11 +252,10 @@ class GameNetAPI:
         print(f"[RELIABLE] Sent ACK for seq {seq_no}")
 
     async def on_receive_ack(self, ack_data: dict):
-        """Handle ACK received from server."""
         seq_no = ack_data.get("ack")
         if seq_no is not None and seq_no in self.reliable_send_buffer:
             print(f"[RELIABLE] Received ACK for seq {seq_no}")
-            del self.reliable_send_buffer[seq_no]  # stop retransmission
+            del self.reliable_send_buffer[seq_no]
 
     # ----------------------- CONNECTION CLOSE -----------------------
     async def close(self):
@@ -244,6 +263,8 @@ class GameNetAPI:
             return
         if self.retransmission_task:
             self.retransmission_task.cancel()
+        if self.receive_task:
+            self.receive_task.cancel()
         await self._connect_ctx.__aexit__(None, None, None)
         self.connected = False
         print("Connection closed")
