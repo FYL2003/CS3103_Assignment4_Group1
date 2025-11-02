@@ -139,7 +139,7 @@ class ReceiverApplication:
         logger.info(f"Server started - Listening on {self.host}:{self.port}\n")
         logger.info("Waiting for packets from clients...\n")
 
-    async def on_message(self, data: dict, reliable: bool):
+    async def on_message(self, data: dict, reliable: bool, proto: GameNetAPI):
         """Callback for received messages - updates metrics"""
         # Extract packet fields
         seq_no = data["seq_no"]
@@ -152,6 +152,29 @@ class ReceiverApplication:
         # Store timing information for application use
         self.packet_arrival_times[seq_no] = metrics_data["arrival_time"]
         self.packet_send_times[seq_no] = timestamp
+
+        # Calculate RTT (one-way latency approximation)
+        rtt_ms = (arrival_time - timestamp) * 1000
+
+        # Add RTT to metrics (also calculates jitter)
+        metrics.add_rtt(rtt_ms)
+
+        # Update receive counters
+        metrics.packets_received += 1
+        payload_bytes = len(json.dumps(payload).encode())
+        metrics.bytes_received += payload_bytes
+
+        # Detect out-of-order delivery
+        out_of_order = seq_no <= metrics.last_seq and metrics.last_seq >= 0
+        if not out_of_order:
+            metrics.last_seq = seq_no
+
+        response = {
+            "ack": "received",
+            "seq_echo": seq_no,
+            "payload_echo": payload,
+        }
+        await proto.send_packet(response, reliable=reliable)    
 
         # Log packet arrival
         self.log_packet_arrival(
@@ -366,6 +389,7 @@ class ReceiverApplication:
 
         # Close API connection
         await self.api.close()
+        await asyncio.sleep(0.1)
 
         logger.info("Receiver stopped successfully")
         logger.info("=" * 100 + "\n")
