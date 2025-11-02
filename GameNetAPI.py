@@ -76,6 +76,26 @@ class GameNetAPI:
         self.receive_task = None
         self.connected = False
 
+    
+    async def _get_udp_packet(self):
+        """
+        Async helper to receive a UDP packet.
+        Returns (data, addr)
+        """
+        fut = self.loop.create_future()
+
+        class ReceiverProtocol(asyncio.DatagramProtocol):
+            def datagram_received(self, data, addr):
+                if not fut.done():
+                    fut.set_result((data, addr))
+
+        transport, _ = await self.loop.create_datagram_endpoint(
+            lambda: ReceiverProtocol(),
+            local_addr=self.local_addr
+        )
+        data, addr = await fut
+        transport.close()
+        return data, addr
     def _ensure_certificates(self, certfile, keyfile):
         return ensure_certificates(certfile, keyfile)
 
@@ -182,26 +202,35 @@ class GameNetAPI:
             await asyncio.sleep(0.05)
 
     # ----------------------- RECEIVING -----------------------
+
+    
     async def _receive_loop(self):
-        while self.connected:
+        """
+        Asynchronous loop to receive UDP datagrams and process QUIC events.
+        """
+        while self.running:
             try:
-                data, addr = (
-                    await self._get_udp_packet()
-                )  # implement according to aioquic socket
+                # Receive raw UDP datagram
+                data, addr = await asyncio.get_event_loop().sock_recvfrom(self.udp_socket, 65535)
+
+                # Feed datagram into QuicConnection
                 events = self.conn._quic.receive_datagram(data, addr, now=time.time())
 
+                # Process events
                 for event in events:
                     if isinstance(event, StreamDataReceived):
-                        await self._process_packet(event.data)
+                        stream_id = event.stream_id
+                        stream_data = event.data
+                        self.handle_stream_data(stream_id, stream_data)
+
                     elif isinstance(event, ConnectionTerminated):
-                        print(f"Connection terminated: {event.error_code}")
-                        self.connected = False
+                        print(f"Connection terminated: {event.error_code} {event.frame_type}")
+                        self.running = False
 
-                await self._skip_timedout_packets()
-
+            except asyncio.CancelledError:
+                break
             except Exception as e:
                 print(f"Receive loop error: {e}")
-            await asyncio.sleep(0.005)
 
     async def _process_packet(self, packet_bytes: bytes):
         channel = packet_bytes[0]
