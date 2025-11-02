@@ -22,6 +22,8 @@ async def main():
         await api.send(data, reliable=reliable)
         await asyncio.sleep(0.05)
 
+    # Wait before closing to ensure last packets are processed
+    await asyncio.sleep(0.5)
     await api.close()
 
 if __name__ == "__main__":
