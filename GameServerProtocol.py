@@ -26,7 +26,6 @@ class GameServerProtocol(QuicConnectionProtocol):
         self.expected_seq = 0  # next expected reliable seq
         self.next_ack_seq = 0  # seq for server -> client packets
         self.on_message = on_message  # callback for received messages
-        self.packet_timestamps = {}  # seq_no -> time when packet entered buffer
         self._timeout_task = None  # Task for checking packet timeouts
         self._expected_seq_time = None  # Time when we started waiting for expected_seq
 
@@ -72,9 +71,8 @@ class GameServerProtocol(QuicConnectionProtocol):
             return
 
         if reliable:
-            # buffer and reorder - track when packet enters buffer
+            # buffer and reorder
             self.reliable_buffer[seq_no] = (data, timestamp)
-            self.packet_timestamps[seq_no] = time.time()  # Track for timeout checking
             await self._deliver_reliable()
         else:
             # deliver immediately
@@ -114,8 +112,7 @@ class GameServerProtocol(QuicConnectionProtocol):
                         f"Skipping and delivering subsequent packets."
                     )
                     
-                    # Remove timed-out packet from tracking if it exists
-                    self.packet_timestamps.pop(self.expected_seq, None)
+                    # Remove timed-out packet from buffer if it exists
                     self.reliable_buffer.pop(self.expected_seq, None)
                     
                     # Advance expected sequence number
@@ -136,8 +133,6 @@ class GameServerProtocol(QuicConnectionProtocol):
         # deliver all in-order packets
         while self.expected_seq in self.reliable_buffer:
             data, ts = self.reliable_buffer.pop(self.expected_seq)
-            # Remove from timeout tracking
-            self.packet_timestamps.pop(self.expected_seq, None)
             await self._deliver_packet(
                 data, reliable=True, seq_no=self.expected_seq, timestamp=ts
             )
