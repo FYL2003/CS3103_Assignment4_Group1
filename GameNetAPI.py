@@ -416,7 +416,6 @@ class GameNetAPI:
                 
                 channel_stats["throughput"] = {
                     "kbps": metrics.throughput_kbps,
-                    "KBps": metrics.throughput_kbps / 8,
                 }
                 
                 # Calculate PDR (Packet Delivery Ratio)
@@ -493,7 +492,6 @@ class GameNetAPI:
 
                 print(f"\n    Throughput:")
                 print(f"      Rate:                   {channel_stats['throughput']['kbps']:.2f} Kbps")
-                print(f"      Rate:                   {channel_stats['throughput']['KBps']:.2f} KBps")
 
                 if "packet_delivery_ratio" in channel_stats:
                     expected = channel_stats.get('expected_packets', 0)
