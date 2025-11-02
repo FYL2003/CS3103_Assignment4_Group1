@@ -73,6 +73,9 @@ class GameServerProtocol(QuicConnectionProtocol):
         if reliable:
             # buffer and reorder
             self.reliable_buffer[seq_no] = (data, timestamp)
+            # Initialize timer if this is the first packet we're waiting for
+            if self._expected_seq_time is None and seq_no >= self.expected_seq:
+                self._expected_seq_time = time.time()
             await self._deliver_reliable()
         else:
             # deliver immediately
@@ -98,31 +101,33 @@ class GameServerProtocol(QuicConnectionProtocol):
                 
                 current_time = time.time()
                 
-                # Initialize expected_seq_time if we're waiting for a new packet
+                # Only check timeout if we're actively waiting for a packet
                 if self._expected_seq_time is None:
-                    self._expected_seq_time = current_time
+                    continue
                 
                 # Check if we've been waiting too long for expected packet
                 elapsed_time = current_time - self._expected_seq_time
                 
                 if elapsed_time > RETRANSMISSION_TIMEOUT:
-                    # Packet timed out - skip it regardless of whether it arrived or not
-                    logger.warning(
-                        f"Packet {self.expected_seq} timed out after {elapsed_time*1000:.1f}ms. "
-                        f"Skipping and delivering subsequent packets."
-                    )
-                    
-                    # Remove timed-out packet from buffer if it exists
-                    self.reliable_buffer.pop(self.expected_seq, None)
-                    
-                    # Advance expected sequence number
-                    self.expected_seq += 1
-                    
-                    # Reset timer for next expected packet
-                    self._expected_seq_time = current_time
-                    
-                    # Try to deliver subsequent packets that arrived
-                    await self._deliver_reliable()
+                    # Check if packet has arrived - if yes, deliver it instead of skipping
+                    if self.expected_seq in self.reliable_buffer:
+                        # Packet arrived but delivery was delayed - deliver it now
+                        await self._deliver_reliable()
+                    else:
+                        # Packet never arrived - skip it
+                        logger.warning(
+                            f"Packet {self.expected_seq} timed out after {elapsed_time*1000:.1f}ms. "
+                            f"Skipping and delivering subsequent packets."
+                        )
+                        
+                        # Advance expected sequence number
+                        self.expected_seq += 1
+                        
+                        # Reset timer for next expected packet
+                        self._expected_seq_time = current_time
+                        
+                        # Try to deliver subsequent packets that arrived
+                        await self._deliver_reliable()
         except asyncio.CancelledError:
             # Task cancelled during shutdown - normal behavior
             pass
