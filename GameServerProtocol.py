@@ -11,15 +11,18 @@ from aioquic.quic.events import (
 RELIABLE = 1
 UNRELIABLE = 0
 TIMESTAMP_BYTES = 8
+RETRANSMISSION_TIMEOUT = 0.2  # 200 ms default
 
 class GameServerProtocol(QuicConnectionProtocol):
     # -------------------- Initialization --------------------
     def __init__(self, *args, on_message=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.reliable_buffer = {}           # seq_no -> packet
+        self.reliable_buffer = {}           # seq_no -> (data, timestamp, arrival_time)
         self.expected_seq = 0               # next expected reliable seq
         self.next_ack_seq = 0               # seq for server -> client packets
         self.on_message = on_message        # callback for received messages
+        self.timeout_task = None            # task for checking timeouts
+        self.skipped_packets = set()        # track skipped packet sequence numbers
 
         # Metrics
         self.metrics = {
@@ -31,6 +34,7 @@ class GameServerProtocol(QuicConnectionProtocol):
                 "jitter_samples": [],
                 "bytes_received": 0,
                 "start_time": None,
+                "packets_skipped": 0,
             },
             UNRELIABLE: {
                 "packets_received": 0,
@@ -42,6 +46,9 @@ class GameServerProtocol(QuicConnectionProtocol):
                 "start_time": None,
             },
         }
+        
+        # Start timeout checker task
+        self.timeout_task = asyncio.create_task(self._check_timeouts())
 
     # -------------------- Event Handling --------------------
     def quic_event_received(self, event):
@@ -56,6 +63,8 @@ class GameServerProtocol(QuicConnectionProtocol):
             asyncio.create_task(self._handle_packet(event.data, reliable=False))
         elif isinstance(event, ConnectionTerminated):
             print("Connection terminated by client")
+            if self.timeout_task:
+                self.timeout_task.cancel()
 
     # -------------------- Packet Handling --------------------
     async def _handle_packet(self, packet: bytes, reliable: bool):
@@ -79,16 +88,34 @@ class GameServerProtocol(QuicConnectionProtocol):
         self._update_metrics(channel, len(packet), timestamp)
 
         if reliable:
-            self.reliable_buffer[seq_no] = (data, timestamp)
+            arrival_time = time.time()
+            self.reliable_buffer[seq_no] = (data, timestamp, arrival_time)
+            
+            # Send ACK immediately for received packet
+            await self._send_ack(seq_no)
+            
             await self._deliver_reliable()
         else:
             await self._deliver_packet(data, reliable=False, seq_no=seq_no, timestamp=timestamp)
+    
+    async def _send_ack(self, seq_no: int):
+        """Send ACK packet to client for received reliable packet"""
+        ack_data = {"type": "ACK", "seq_no": seq_no}
+        await self.send_packet(ack_data, reliable=False)
 
     async def _deliver_reliable(self):
-        while self.expected_seq in self.reliable_buffer:
-            data, ts = self.reliable_buffer.pop(self.expected_seq)
-            await self._deliver_packet(data, reliable=True, seq_no=self.expected_seq, timestamp=ts)
-            self.expected_seq += 1
+        """Deliver reliable packets in order, respecting skipped packets"""
+        while self.expected_seq in self.reliable_buffer or self.expected_seq in self.skipped_packets:
+            if self.expected_seq in self.skipped_packets:
+                # Skip this sequence number as it timed out
+                print(f"[RELIABLE] Skipping timed-out packet Seq {self.expected_seq}")
+                self.expected_seq += 1
+                continue
+                
+            if self.expected_seq in self.reliable_buffer:
+                data, ts, arrival_time = self.reliable_buffer.pop(self.expected_seq)
+                await self._deliver_packet(data, reliable=True, seq_no=self.expected_seq, timestamp=ts)
+                self.expected_seq += 1
 
     async def _deliver_packet(self, data, reliable, seq_no, timestamp):
         rtt = int(time.time() * 1000) - timestamp
@@ -107,6 +134,44 @@ class GameServerProtocol(QuicConnectionProtocol):
                 await self.on_message(formatted_data, reliable, self)
             except Exception as e:
                 print(f"Error in message callback: {e}")
+    
+    async def _check_timeouts(self):
+        """Periodically check for timed-out packets and skip them"""
+        try:
+            while True:
+                await asyncio.sleep(0.01)  # Check every 10ms
+                
+                current_time = time.time()
+                timed_out_seqs = []
+                
+                # Check if expected packet is missing and if any buffered packets timed out
+                for seq_no, (data, timestamp, arrival_time) in list(self.reliable_buffer.items()):
+                    elapsed = current_time - arrival_time
+                    if elapsed > RETRANSMISSION_TIMEOUT:
+                        timed_out_seqs.append(seq_no)
+                
+                # Also check if we're waiting for expected_seq too long
+                # If we have buffered packets beyond expected_seq and expected_seq is missing
+                if self.reliable_buffer:
+                    min_buffered_seq = min(self.reliable_buffer.keys())
+                    if min_buffered_seq > self.expected_seq:
+                        # We're waiting for expected_seq but have later packets
+                        # Check if the earliest buffered packet has been waiting too long
+                        _, _, earliest_arrival = self.reliable_buffer[min_buffered_seq]
+                        if current_time - earliest_arrival > RETRANSMISSION_TIMEOUT:
+                            # Skip expected_seq as it's missing and timeout exceeded
+                            print(f"[TIMEOUT] Skipping missing packet Seq {self.expected_seq} after {RETRANSMISSION_TIMEOUT*1000}ms")
+                            self.skipped_packets.add(self.expected_seq)
+                            self.metrics[RELIABLE]["packets_skipped"] += 1
+                            await self._deliver_reliable()
+                
+                # Mark timed-out buffered packets
+                for seq_no in timed_out_seqs:
+                    print(f"[TIMEOUT] Packet Seq {seq_no} timed out after {RETRANSMISSION_TIMEOUT*1000}ms")
+                    self.reliable_buffer.pop(seq_no, None)
+                    
+        except asyncio.CancelledError:
+            pass  # Task was cancelled, exit gracefully
 
     # -------------------- Sending Packets --------------------
     async def send_packet(self, data: dict, reliable: bool = True):
@@ -160,7 +225,8 @@ class GameServerProtocol(QuicConnectionProtocol):
             )
             last_rtt = ch_metrics["last_rtt"]
             avg_jitter = sum(ch_metrics["jitter_samples"]) / len(ch_metrics["jitter_samples"]) if ch_metrics["jitter_samples"] else 0
-            print(
+            
+            stats = (
                 f"[{name} Metrics] "
                 f"Packets Received: {ch_metrics['packets_received']}, "
                 f"Packets Sent: {ch_metrics['packets_sent']}, "
@@ -169,3 +235,8 @@ class GameServerProtocol(QuicConnectionProtocol):
                 f"Last RTT: {last_rtt} ms, "
                 f"Avg Jitter: {avg_jitter:.2f} ms"
             )
+            
+            if channel == RELIABLE and "packets_skipped" in ch_metrics:
+                stats += f", Packets Skipped: {ch_metrics['packets_skipped']}"
+            
+            print(stats)

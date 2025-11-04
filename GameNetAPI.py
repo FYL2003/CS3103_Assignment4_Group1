@@ -22,6 +22,11 @@ class GameClientProtocol(QuicConnectionProtocol):
         super().__init__(*args, **kwargs)
         self.on_message = on_message
         self.seq = {RELIABLE: 0, UNRELIABLE: 0}
+        self.pending_acks = {}  # seq_no -> (data, timestamp, retrans_count)
+        self.retransmit_task = None
+        
+        # Start retransmission checker
+        self.retransmit_task = asyncio.create_task(self._check_retransmit())
 
     def quic_event_received(self, event):
         """Handle incoming QUIC events (messages from server)"""
@@ -55,6 +60,14 @@ class GameClientProtocol(QuicConnectionProtocol):
             payload_bytes = event.data[header_len:]
             payload = json.loads(payload_bytes.decode())
             
+            # Check if this is an ACK packet
+            if isinstance(payload, dict) and payload.get("type") == "ACK":
+                seq_no = payload.get("seq_no")
+                if seq_no is not None and seq_no in self.pending_acks:
+                    print(f"[ACK] Received ACK for Seq {seq_no}")
+                    self.pending_acks.pop(seq_no)
+                return
+            
             if self.on_message:
                 await self.on_message(payload, reliable=False)
         except Exception as e:
@@ -78,12 +91,57 @@ class GameClientProtocol(QuicConnectionProtocol):
             stream_id = self._quic.get_next_available_stream_id()
             self._quic.send_stream_data(stream_id, packet, end_stream=True)
             print(f"[RELIABLE] Sent Seq {seq_no}: {payload}")
+            
+            # Track packet for ACK and potential retransmission
+            self.pending_acks[seq_no] = (data, time.time(), 0)
         else:
             self._quic.send_datagram_frame(packet)
             print(f"[UNRELIABLE] Sent Seq {seq_no}: {payload}")
 
         self.seq[channel] += 1
         self.transmit()
+    
+    async def _check_retransmit(self):
+        """Check for packets that need retransmission"""
+        MAX_RETRANSMIT = 3  # Maximum retransmission attempts
+        try:
+            while True:
+                await asyncio.sleep(0.05)  # Check every 50ms
+                
+                current_time = time.time()
+                to_retransmit = []
+                
+                for seq_no, (data, sent_time, retrans_count) in list(self.pending_acks.items()):
+                    elapsed = current_time - sent_time
+                    if elapsed > RETRANSMISSION_TIMEOUT:
+                        if retrans_count < MAX_RETRANSMIT:
+                            to_retransmit.append((seq_no, data, retrans_count))
+                        else:
+                            # Give up after MAX_RETRANSMIT attempts
+                            print(f"[RETRANSMIT] Giving up on Seq {seq_no} after {MAX_RETRANSMIT} attempts")
+                            self.pending_acks.pop(seq_no)
+                
+                # Retransmit packets
+                for seq_no, data, retrans_count in to_retransmit:
+                    print(f"[RETRANSMIT] Retransmitting Seq {seq_no} (attempt {retrans_count + 1})")
+                    timestamp = int(time.time() * 1000)
+                    payload = json.dumps(data)
+                    header = (
+                        RELIABLE.to_bytes(1, "big")
+                        + seq_no.to_bytes(2, "big")
+                        + timestamp.to_bytes(TIMESTAMP_BYTES, "big")
+                    )
+                    packet = header + payload.encode()
+                    
+                    stream_id = self._quic.get_next_available_stream_id()
+                    self._quic.send_stream_data(stream_id, packet, end_stream=True)
+                    self.transmit()
+                    
+                    # Update tracking
+                    self.pending_acks[seq_no] = (data, time.time(), retrans_count + 1)
+                    
+        except asyncio.CancelledError:
+            pass  # Task was cancelled, exit gracefully
 
 class GameNetAPI:
     def __init__(
