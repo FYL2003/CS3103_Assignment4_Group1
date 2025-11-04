@@ -12,6 +12,8 @@ Fixes:
   Ctrl+C or a client disconnect happens first.
 - Consolidated three logging functions into one unified log_packet_event method.
 - Removed redundant packet timing dictionaries (data already in PacketInfo).
+- REMOVED PacketInfo and self.delivered_packets list
+- MOVED delivered and out-of-order counts into GameNetAPI
 """
 
 import asyncio
@@ -22,21 +24,6 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 from GameNetAPI import GameNetAPI  # Assuming GameNetAPI is in a separate file
-
-
-# -------------------- Data Classes --------------------
-@dataclass
-class PacketInfo:
-    """Stores information about a received packet"""
-
-    seq_no: int
-    channel: str  # "RELIABLE" or "UNRELIABLE"
-    timestamp: float  # Original send timestamp (seconds)
-    arrival_time: float  # When it arrived at receiver
-    delivery_time: float  # When delivered to application
-    rtt_ms: float
-    payload: dict
-    out_of_order: bool = False
 
 
 # -------------------- Receiver Application --------------------
@@ -68,9 +55,6 @@ class ReceiverApplication:
             certfile=certfile,
             keyfile=keyfile,
         )
-
-        # Packet tracking
-        self.delivered_packets: List[PacketInfo] = []
 
         # Control flags
         self.running: bool = False
@@ -154,20 +138,9 @@ class ReceiverApplication:
 
         # Update delivery metrics
         self.api.metrics[channel].packets_delivered += 1
-
-        # Store packet info for final statistics
-        packet_info = PacketInfo(
-            seq_no=seq_no,
-            channel=channel,
-            timestamp=timestamp,
-            arrival_time=metrics_data["arrival_time"],
-            delivery_time=delivery_time,
-            rtt_ms=rtt_ms,
-            payload=payload,
-            out_of_order=metrics_data["out_of_order"],
-        )
-        self.delivered_packets.append(packet_info)
-
+        if metrics_data["out_of_order"]:
+            self.api.metrics[channel].out_of_order_count += 1
+        
         # --- 5. Log Packet Delivery & Application Data ---
         self.log_packet_event(
             "DELIVERY",
@@ -193,7 +166,12 @@ class ReceiverApplication:
         if self.stats_printed_for_session:
             return
 
-        if not self.delivered_packets:
+        # Check for delivery using the API's metrics
+        total_delivered = sum(
+            m.packets_delivered for m in self.api.metrics.values()
+        )
+
+        if total_delivered == 0:
             print("No packets were delivered in this session.")
             self.api.reset_all_metrics()  # Still reset API state
             return
@@ -206,16 +184,8 @@ class ReceiverApplication:
         # FIX: Set the flag so we don't print them again
         self.stats_printed_for_session = True 
 
-        out_of_order_count = sum(
-            1 for p in self.delivered_packets if p.out_of_order
-        )
-        self.api.print_statistics(
-            delivered_packets_count=len(self.delivered_packets),
-            out_of_order_count=out_of_order_count,
-        )
-        
-        # Clear delivered packets list for next connection
-        self.delivered_packets.clear()
+        # Call print_statistics with NO arguments
+        self.api.print_statistics()
         
         # Explicitly reset all metrics for next connection
         self.api.reset_all_metrics()

@@ -47,6 +47,7 @@ class ChannelMetrics:
     packets_received: int = 0
     packets_delivered: int = 0
     bytes_received: int = 0
+    out_of_order_count: int = 0 # <-- ADDED
     
     # Set up bounded deques for RTT and jitter samples
     rtts: deque = field(default_factory=lambda: deque(maxlen=MAX_RTT_SAMPLES))
@@ -92,6 +93,7 @@ class ChannelMetrics:
         self.packets_received = 0
         self.packets_delivered = 0
         self.bytes_received = 0
+        self.out_of_order_count = 0 # <-- ADDED
         self.rtts.clear()
         self.jitter_samples.clear()
         self.last_rtt = None
@@ -373,32 +375,33 @@ class GameNetAPI:
 
         await self.conn.send_packet(data, reliable=reliable)
 
-    def get_statistics_summary(self, delivered_packets_count: int = 0) -> dict:
+    def get_statistics_summary(self) -> dict:
         """
         Get comprehensive statistics summary for both channels
-        
-        Args:
-            delivered_packets_count: Total number of packets delivered to application
-            
-        Returns:
-            Dictionary containing statistics for both channels
+        (No arguments needed anymore)
         """
         runtime = time.time() - self.start_time if self.start_time else 0
+        
+        # Calculate total delivered from metrics
+        total_delivered = sum(m.packets_delivered for m in self.metrics.values())
         
         summary = {
             "runtime": runtime,
             "total_arrivals": self.total_arrivals,
-            "total_delivered": delivered_packets_count,
+            "total_delivered": total_delivered, # Use calculated value
             "channels": {}
         }
         
+        total_out_of_order = 0
         for channel_name in ["RELIABLE", "UNRELIABLE"]:
             metrics = self.metrics[channel_name]
             channel_stats = {
                 "packets_received": metrics.packets_received,
                 "packets_delivered": metrics.packets_delivered,
                 "bytes_received": metrics.bytes_received,
+                "out_of_order_count": metrics.out_of_order_count, # Add this
             }
+            total_out_of_order += metrics.out_of_order_count # Add to total
             
             if metrics.rtts:
                 channel_stats["latency"] = {
@@ -426,6 +429,9 @@ class GameNetAPI:
             
             summary["channels"][channel_name] = channel_stats
         
+        # Add total out of order to summary
+        summary["total_out_of_order"] = total_out_of_order
+        
         # Calculate total throughput
         total_bytes = sum(m.bytes_received for m in self.metrics.values())
         if runtime > 0:
@@ -435,18 +441,15 @@ class GameNetAPI:
         
         return summary
 
-    def print_statistics(self, delivered_packets_count: int = 0, out_of_order_count: int = 0):
+    def print_statistics(self):
         """
         Print comprehensive statistics report
+        (No arguments needed anymore)
         
         Satisfies assignment requirement (i): Measure performance metrics
         including latency, jitter, throughput, and packet delivery ratio
-        
-        Args:
-            delivered_packets_count: Total number of packets delivered to application
-            out_of_order_count: Number of out-of-order packets received
         """
-        stats = self.get_statistics_summary(delivered_packets_count)
+        stats = self.get_statistics_summary()
         runtime = stats["runtime"]
 
         print("")
@@ -503,13 +506,15 @@ class GameNetAPI:
         # Out-of-order statistics
         print(f"\n{'ORDERING STATISTICS':^100}")
         print("-" * 100)
-        print(f"  Out-of-Order Packets:       {out_of_order_count}")
-        print(f"  In-Order Packets:           {delivered_packets_count - out_of_order_count}")
+        total_ooo = stats['total_out_of_order']
+        total_del = stats['total_delivered']
+        print(f"  Out-of-Order Packets:       {total_ooo}")
+        print(f"  In-Order Packets:           {total_del - total_ooo}")
 
         print("=" * 100)
         
-        # Reset metrics after displaying statistics to prepare for next connection
-        self.reset_all_metrics()
+        # NOTE: reset_all_metrics() is no longer called here.
+        # The application (server.py) is now responsible for calling it.
     
     def reset_all_metrics(self):
         """Reset all metrics across all channels - called after statistics display"""
