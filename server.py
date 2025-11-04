@@ -1,31 +1,27 @@
 """
-H-QUIC Receiver Application (Server Mode)
+H-QUIC Receiver Application (Server Mode) - REFACTORED & FIXED
 
 This server receives packets from game clients using the H-QUIC protocol,
 tracks performance metrics, and displays comprehensive statistics.
 
-Requirements satisfied:
-- Point (g): Logs SeqNo, ChannelType, Timestamp, RTT, packet arrivals
-- Point (i): Measures latency, jitter, throughput, and packet delivery ratio
+Fixes:
+- Consolidated all packet processing logic into `on_message`.
+- Centralized exception handling and shutdown logic in `main`.
+- Added a `stats_printed_for_session` flag to ensure stats are
+  printed exactly once on shutdown, regardless of whether
+  Ctrl+C or a client disconnect happens first.
+- Consolidated three logging functions into one unified log_packet_event method.
+- Removed redundant packet timing dictionaries (data already in PacketInfo).
 """
 
 import asyncio
 import json
-import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from GameNetAPI import GameNetAPI
-
-# Configure detailed logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s.%(msecs)03d | %(message)s",
-    datefmt="%H:%M:%S",
-)
-logger = logging.getLogger(__name__)
+from GameNetAPI import GameNetAPI  # Assuming GameNetAPI is in a separate file
 
 
 # -------------------- Data Classes --------------------
@@ -48,14 +44,8 @@ class ReceiverApplication:
     """
     H-QUIC Receiver Application (SERVER MODE)
 
-    Receives packets from game clients, processes them according to channel type,
-    tracks comprehensive metrics, and displays detailed logs.
-
-    Features:
-    - Separate handling for RELIABLE and UNRELIABLE channels
-    - Out-of-order packet detection
-    - Real-time metrics calculation
-    - Comprehensive statistics reporting
+    Receives packets, processes them, tracks metrics, and logs results.
+    Logic is consolidated for clarity and robust shutdown.
     """
 
     def __init__(
@@ -65,22 +55,12 @@ class ReceiverApplication:
         certfile: str = "cert.pem",
         keyfile: str = "key.pem",
     ):
-        """
-        Initialize receiver application
-
-        Args:
-            host: Server host address
-            port: Server port number
-            certfile: Path to SSL certificate
-            keyfile: Path to SSL private key
-        """
         self.host = host
         self.port = port
         self.certfile = certfile
         self.keyfile = keyfile
 
         # Initialize GameNetAPI in SERVER mode
-        # Certificate generation is handled inside GameNetAPI
         self.api = GameNetAPI(
             isClient=False,
             host=host,
@@ -91,81 +71,73 @@ class ReceiverApplication:
 
         # Packet tracking
         self.delivered_packets: List[PacketInfo] = []
-        self.packet_arrival_times: Dict[int, float] = {}
-        self.packet_send_times: Dict[int, float] = {}
 
         # Control flags
         self.running: bool = False
+        self.stats_printed_for_session: bool = False
 
         # Display configuration
         self.log_separator_interval: int = 10  # Print separator every N packets
 
-        # Print startup header
-        self.print_startup_header()
-
-        # Set up message callback
+        # Set up callbacks
         self.api.set_message_callback(self.on_message)
-
-        # Set up connection termination callback
-        self.api.set_connection_terminated_callback(self.on_connection_terminated)
+        self.api.set_connection_terminated_callback(
+            self.on_connection_terminated
+        )
 
     def print_startup_header(self):
         """Print formatted startup header"""
         print("\n" + "=" * 100)
         print("H-QUIC RECEIVER APPLICATION (SERVER MODE)")
         print("=" * 100)
-        print(f"Started:        {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Started:      {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"Listening on:   {self.host}:{self.port}")
-        print(f"Certificate:    {self.certfile}")
-        print(f"Private Key:    {self.keyfile}")
         print("=" * 100)
         print("\nLog Format:")
-        print("  [ARRIVAL]  - Packet arrives from network")
-        print("  [DELIVER]  - Packet delivered to application (after reordering)")
+        print("  [ARRIVAL]   - Packet arrives from network")
+        print("  [DELIVER]   - Packet delivered to application (after reordering)")
         print("  [OUT-ORDER] - Packet received out of order")
-        print("  [APP-DATA] - Application displays packet payload")
+        print("  [APP-DATA]  - Application displays packet payload")
         print("=" * 100 + "\n")
 
     async def start(self):
         """Start the receiver server"""
+        self.print_startup_header()
         self.api.start_time = time.time()
         self.running = True
 
-        logger.info("Starting H-QUIC receiver server...")
-
-        # Start server (listens for incoming connections)
+        print("Starting H-QUIC receiver server...")
         await self.api.start_server()
-
-        logger.info(f"Server started - Listening on {self.host}:{self.port}\n")
-        logger.info("Waiting for packets from clients...\n")
+        print(f"Server started - Listening on {self.host}:{self.port}\n")
+        print("Waiting for packets from clients...\n")
 
     async def on_message(self, data: dict, reliable: bool, proto: GameNetAPI):
-        """Callback for received messages - updates metrics"""
-        # Extract packet fields
+        """
+        Callback for received messages.
+        This function now handles the *entire* packet lifecycle.
+        """
+        
+        # --- 1. Extract Data and Track Core Metrics ---
         seq_no = data["seq_no"]
         timestamp = data["timestamp"] / 1000.0  # Convert ms to seconds
         payload = data["payload"]
-        buffer_entry_time = data.get("buffer_entry_time")  # Time when packet entered buffer (or None)
+        buffer_entry_time = data.get("buffer_entry_time")
 
-        # Track metrics using API (now includes buffering delay calculation)
-        metrics_data = self.api.track_packet_metrics(seq_no, timestamp, payload, reliable, buffer_entry_time)
-        # Store timing information for application use
-        self.packet_arrival_times[seq_no] = metrics_data["arrival_time"]
-        self.packet_send_times[seq_no] = timestamp
-        
-        # Extract metrics from returned data
-        rtt_ms = metrics_data["rtt_ms"]
-        out_of_order = metrics_data["out_of_order"]
+        metrics_data = self.api.track_packet_metrics(
+            seq_no, timestamp, payload, reliable, buffer_entry_time
+        )
 
+        # --- 2. Send Acknowledgement (ACK) ---
         response = {
             "ack": "received",
             "seq_echo": seq_no,
             "payload_echo": payload,
         }
-        await proto.send_packet(response, reliable=reliable)    
+        await proto.send_packet(response, reliable=reliable)
 
-        # Log packet arrival
-        self.log_packet_arrival(
+        # --- 3. Log Packet Arrival ---
+        self.log_packet_event(
+            "ARRIVAL",
             seq_no=seq_no,
             channel=metrics_data["channel"],
             timestamp=timestamp,
@@ -173,142 +145,32 @@ class ReceiverApplication:
             out_of_order=metrics_data["out_of_order"],
         )
 
-        # Deliver packet to application
-        await self.deliver_packet(
-            seq_no=seq_no,
-            channel=metrics_data["channel"],
-            timestamp=timestamp,
-            arrival_time=metrics_data["arrival_time"],
-            rtt_ms=metrics_data["rtt_ms"],
-            buffering_delay_ms=metrics_data["buffering_delay_ms"],
-            payload=payload,
-            out_of_order=metrics_data["out_of_order"],
-        )
-
-    async def on_connection_terminated(self):
-        """Callback when client connection is terminated - display statistics"""
-        logger.info("")
-        logger.info("=" * 100)
-        logger.info("CLIENT CONNECTION TERMINATED")
-        logger.info("=" * 100)
-
-        # Display statistics
-        out_of_order_count = sum(1 for p in self.delivered_packets if p.out_of_order)
-        self.api.print_statistics(
-            delivered_packets_count=len(self.delivered_packets),
-            out_of_order_count=out_of_order_count
-        )
-        
-        # Clear delivered packets list for next connection
-        self.delivered_packets.clear()
-        self.packet_arrival_times.clear()
-        self.packet_send_times.clear()
-        
-        # Explicitly reset all metrics for next connection
-        self.api.reset_all_metrics()
-
-        logger.info("")
-        logger.info("=" * 100)
-        logger.info("Server continues running - waiting for new connections...")
-        logger.info("Press Ctrl+C to stop the server")
-        logger.info("=" * 100)
-
-    async def receive_loop(self):
-        """
-        Main receive loop - receives and processes packets
-
-        This is the core loop that:
-        1. Receives packets from GameNetAPI
-        2. Processes them based on channel type
-        3. Tracks metrics
-        4. Displays logs
-        """
-        try:
-            while self.running:
-                await asyncio.sleep(0.1)  # Prevent 100% CPU usage in loop
-
-        except KeyboardInterrupt:
-            logger.info("\nInterrupted by user (Ctrl+C)")
-        except asyncio.CancelledError:
-            logger.info("\nReceive loop cancelled")
-        except Exception as e:
-            logger.error(f"Error in receive loop: {e}", exc_info=True)
-
-    def log_packet_arrival(
-        self,
-        seq_no: int,
-        channel: str,
-        timestamp: float,
-        rtt_ms: float,
-        out_of_order: bool,
-    ):
-        """
-        Log packet arrival with detailed information
-
-        Satisfies assignment requirement (g): Print logs showing SeqNo,
-        ChannelType, Timestamp, packet arrivals, and RTT
-        """
-        # Build status indicators
-        indicators = []
-        if out_of_order:
-            indicators.append("[OUT-OF-ORDER]")
-
-        status = " ".join(indicators) if indicators else ""
-
-        # Format channel string
-        channel_str = "REL" if channel == "RELIABLE" else "UNR"
-
-        # Log arrival
-        logger.info(
-            f"[ARRIVAL]  "
-            f"SeqNo={seq_no:4d} | "
-            f"Channel={channel_str} | "
-            f"Timestamp={timestamp:.6f}s | "
-            f"RTT={rtt_ms:7.2f}ms "
-            f"{status}"
-        )
-
-    async def deliver_packet(
-        self,
-        seq_no: int,
-        channel: str,
-        timestamp: float,
-        arrival_time: float,
-        rtt_ms: float,
-        buffering_delay_ms: float,
-        payload: dict,
-        out_of_order: bool,
-    ):
-        """
-        Deliver packet to application layer
-
-        This simulates the application receiving and processing the packet.
-        In a real game, this would update game state, render graphics, etc.
-        """
+        # --- 4. Process Application-Layer "Delivery" ---
         delivery_time = time.time()
-
-        # Calculate total delay (RTT + buffering delay)
+        channel = metrics_data["channel"]
+        rtt_ms = metrics_data["rtt_ms"]
+        buffering_delay_ms = metrics_data["buffering_delay_ms"]
         total_delay_ms = rtt_ms + buffering_delay_ms
 
-        # Update metrics
-        metrics = self.api.metrics[channel]
-        metrics.packets_delivered += 1
+        # Update delivery metrics
+        self.api.metrics[channel].packets_delivered += 1
 
-        # Store packet info
+        # Store packet info for final statistics
         packet_info = PacketInfo(
             seq_no=seq_no,
             channel=channel,
             timestamp=timestamp,
-            arrival_time=arrival_time,
+            arrival_time=metrics_data["arrival_time"],
             delivery_time=delivery_time,
             rtt_ms=rtt_ms,
             payload=payload,
-            out_of_order=out_of_order,
+            out_of_order=metrics_data["out_of_order"],
         )
         self.delivered_packets.append(packet_info)
 
-        # Log delivery
-        self.log_packet_delivery(
+        # --- 5. Log Packet Delivery & Application Data ---
+        self.log_packet_event(
+            "DELIVERY",
             seq_no=seq_no,
             channel=channel,
             rtt_ms=rtt_ms,
@@ -316,80 +178,127 @@ class ReceiverApplication:
             total_delay_ms=total_delay_ms,
         )
 
-        # Display application data
-        self.display_packet_data(seq_no, channel, payload)
+        self.log_packet_event("APP-DATA", seq_no=seq_no, channel=channel, payload=payload)
 
-        # Print separator for readability
+        # --- 6. Print Separator (for readability) ---
         if seq_no > 0 and seq_no % self.log_separator_interval == 0:
-            logger.info("  " + "-" * 95)
+            print("  " + "-" * 95)
 
-    def log_packet_delivery(
-        self,
-        seq_no: int,
-        channel: str,
-        rtt_ms: float,
-        buffering_delay_ms: float,
-        total_delay_ms: float,
-    ):
-        """Log packet delivery to application"""
-        channel_str = "REL" if channel == "RELIABLE" else "UNR"
-
-        logger.info(
-            f"[DELIVER]  "
-            f"SeqNo={seq_no:4d} | "
-            f"Channel={channel_str} | "
-            f"RTT={rtt_ms:7.2f}ms | "
-            f"BuffDelay={buffering_delay_ms:6.2f}ms | "
-            f"TotalDelay={total_delay_ms:7.2f}ms | "
-        )
-
-    def display_packet_data(self, seq_no: int, channel: str, payload: dict):
+    def _display_and_reset_stats(self):
         """
-        Display packet payload data (simulates application usage)
-
-        In a real game, this would be:
-        - Player position updates
-        - Game state changes
-        - Chat messages
-        - etc.
+        Helper function to print statistics and reset session state.
+        This is now "idempotent" - safe to call multiple times.
         """
-        channel_str = "REL" if channel == "RELIABLE" else "UNR"
+        # FIX: If stats were already printed for this session, do nothing.
+        if self.stats_printed_for_session:
+            return
 
-        # Format payload for display
-        payload_str = json.dumps(payload)
-        if len(payload_str) > 70:
-            payload_str = payload_str[:67] + "..."
+        if not self.delivered_packets:
+            print("No packets were delivered in this session.")
+            self.api.reset_all_metrics()  # Still reset API state
+            return
 
-        logger.info(
-            f"[APP-DATA] "
-            f"SeqNo={seq_no:4d} | "
-            f"Channel={channel_str} | "
-            f"Data: {payload_str}"
+        # --- This is a new session, print stats ---
+        print("=" * 100)
+        print("SESSION STATISTICS")
+        print("=" * 100)
+        
+        # FIX: Set the flag so we don't print them again
+        self.stats_printed_for_session = True 
+
+        out_of_order_count = sum(
+            1 for p in self.delivered_packets if p.out_of_order
         )
+        self.api.print_statistics(
+            delivered_packets_count=len(self.delivered_packets),
+            out_of_order_count=out_of_order_count,
+        )
+        
+        # Clear delivered packets list for next connection
+        self.delivered_packets.clear()
+        
+        # Explicitly reset all metrics for next connection
+        self.api.reset_all_metrics()
+
+    async def on_connection_terminated(self):
+        """Callback when client connection is terminated."""
+        print("")
+        print("=" * 100)
+        print("CLIENT CONNECTION TERMINATED")
+        
+        self._display_and_reset_stats()  # Display stats and reset
+        
+        # FIX: RE-ARM THE FLAG for the *next* session
+        self.stats_printed_for_session = False
+
+        print("")
+        print("=" * 100)
+        print("Server continues running - waiting for new connections...")
+        print("Press Ctrl+C to stop the server")
+        print("=" * 100)
+
+    async def receive_loop(self):
+        """
+        Main "keep-alive" loop.
+        This just keeps the main coroutine running so the server can
+        receive packets via its background callbacks.
+        """
+        try:
+            while self.running:
+                await asyncio.sleep(1)  # Sleep to prevent high CPU
+        except asyncio.CancelledError:
+            # This is expected when stop() is called
+            print("\nReceive loop cancelled")
+
+    # -------------------- Logging Functions --------------------
+
+    def log_packet_event(self, event_type: str, seq_no: int, channel: str, **kwargs):
+        """Unified packet event logging for ARRIVAL, DELIVERY, and APP-DATA events"""
+        channel_str = "REL" if channel == "RELIABLE" else "UNR"
+        
+        if event_type == "ARRIVAL":
+            status = "[OUT-OF-ORDER]" if kwargs.get("out_of_order") else ""
+            msg = (f"[ARRIVAL]   SeqNo={seq_no:4d} | Channel={channel_str} | "
+                   f"Timestamp={kwargs['timestamp']:.6f}s | RTT={kwargs['rtt_ms']:7.2f}ms {status}")
+        elif event_type == "DELIVERY":
+            msg = (f"[DELIVER]   SeqNo={seq_no:4d} | Channel={channel_str} | "
+                   f"RTT={kwargs['rtt_ms']:7.2f}ms | BuffDelay={kwargs['buffering_delay_ms']:6.2f}ms | "
+                   f"TotalDelay={kwargs['total_delay_ms']:7.2f}ms")
+        else:  # APP-DATA
+            payload_str = json.dumps(kwargs["payload"])
+            if len(payload_str) > 70:
+                payload_str = payload_str[:67] + "..."
+            msg = f"[APP-DATA]  SeqNo={seq_no:4d} | Channel={channel_str} | Data: {payload_str}"
+        
+        print(msg)
 
     async def stop(self):
         """Stop the receiver gracefully"""
+        if not self.running:  # Prevent double-stop
+            return
+            
         self.running = False
+        print("\n" + "=" * 100)
+        print("STOPPING RECEIVER APPLICATION")
+        print("=" * 100)
 
-        logger.info("\n" + "=" * 100)
-        logger.info("STOPPING RECEIVER APPLICATION")
-        logger.info("=" * 100)
+        # Call the stats helper. If a client was connected,
+        # this will print their stats. If stats were already
+        # printed by on_connection_terminated, this will do nothing.
+        self._display_and_reset_stats()
 
         # Close API connection
         await self.api.close()
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.1)  # Give tasks a moment to close
 
-        logger.info("Receiver stopped successfully")
-        logger.info("=" * 100 + "\n")
+        print("Receiver stopped successfully")
+        print("=" * 100 + "\n")
 
 
 # -------------------- Main Entry Point --------------------
 async def main():
     """
     Main entry point for H-QUIC receiver application
-
-    Usage:
-        python server.py
     """
     # Configuration
     HOST = "localhost"
@@ -397,7 +306,6 @@ async def main():
     CERTFILE = "cert.pem"
     KEYFILE = "key.pem"
 
-    # Create receiver application
     receiver = ReceiverApplication(
         host=HOST, port=PORT, certfile=CERTFILE, keyfile=KEYFILE
     )
@@ -406,30 +314,30 @@ async def main():
         # Start receiver server
         await receiver.start()
 
-        # Run receive loop
+        # Run "keep-alive" loop
         await receiver.receive_loop()
 
     except KeyboardInterrupt:
-        logger.info("\n\nInterrupted by user (Ctrl+C)")
+        print("\n\nInterrupted by user (Ctrl+C). Stopping...")
     except Exception as e:
-        logger.error(f"\nError: {e}", exc_info=True)
+        print(f"\nUncaught error in main: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
-        # Always stop gracefully and show statistics
+        # This will *always* run, ensuring a clean shutdown
+        print("Shutting down...")
         await receiver.stop()
 
 
 if __name__ == "__main__":
     """
     Run the receiver application
-
-    Example:
-        python server.py
     """
     print("CS3103 Assignment 4 - H-QUIC Protocol")
     print("Adaptive Hybrid Transport Protocol for Games")
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
+        # This catches the interrupt *after* asyncio.run() has finished
+        # (because main() catches it first and returns)
         print("\nEnd Connection")
-    except Exception as e:
-        logger.error(f"\nUnexpected error: {e}", exc_info=True)
