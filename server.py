@@ -3,13 +3,6 @@ H-QUIC Receiver Application (Server Mode) - REFACTORED & FIXED
 
 This server receives packets from game clients using the H-QUIC protocol,
 tracks performance metrics, and displays comprehensive statistics.
-
-Fixes:
-- Consolidated all packet processing logic into `on_message`.
-- Centralized exception handling and shutdown logic in `main`.
-- Added a `stats_printed_for_session` flag to ensure stats are
-  printed exactly once on shutdown, regardless of whether
-  Ctrl+C or a client disconnect happens first.
 """
 
 import asyncio
