@@ -3,6 +3,15 @@ H-QUIC Receiver Application (Server Mode) - REFACTORED & FIXED
 
 This server receives packets from game clients using the H-QUIC protocol,
 tracks performance metrics, and displays comprehensive statistics.
+
+Fixes:
+- Consolidated all packet processing logic into `on_message`.
+- Centralized exception handling and shutdown logic in `main`.
+- Added a `stats_printed_for_session` flag to ensure stats are
+  printed exactly once on shutdown, regardless of whether
+  Ctrl+C or a client disconnect happens first.
+- Consolidated three logging functions into one unified log_packet_event method.
+- Removed redundant packet timing dictionaries (data already in PacketInfo).
 """
 
 import asyncio
@@ -62,8 +71,6 @@ class ReceiverApplication:
 
         # Packet tracking
         self.delivered_packets: List[PacketInfo] = []
-        self.packet_arrival_times: Dict[int, float] = {}
-        self.packet_send_times: Dict[int, float] = {}
 
         # Control flags
         self.running: bool = False
@@ -119,10 +126,6 @@ class ReceiverApplication:
         metrics_data = self.api.track_packet_metrics(
             seq_no, timestamp, payload, reliable, buffer_entry_time
         )
-        
-        # Store timing information
-        self.packet_arrival_times[seq_no] = metrics_data["arrival_time"]
-        self.packet_send_times[seq_no] = timestamp
 
         # --- 2. Send Acknowledgement (ACK) ---
         response = {
@@ -133,7 +136,8 @@ class ReceiverApplication:
         await proto.send_packet(response, reliable=reliable)
 
         # --- 3. Log Packet Arrival ---
-        self.log_packet_arrival(
+        self.log_packet_event(
+            "ARRIVAL",
             seq_no=seq_no,
             channel=metrics_data["channel"],
             timestamp=timestamp,
@@ -165,7 +169,8 @@ class ReceiverApplication:
         self.delivered_packets.append(packet_info)
 
         # --- 5. Log Packet Delivery & Application Data ---
-        self.log_packet_delivery(
+        self.log_packet_event(
+            "DELIVERY",
             seq_no=seq_no,
             channel=channel,
             rtt_ms=rtt_ms,
@@ -173,7 +178,7 @@ class ReceiverApplication:
             total_delay_ms=total_delay_ms,
         )
 
-        self.display_packet_data(seq_no, channel, payload)
+        self.log_packet_event("APP-DATA", seq_no=seq_no, channel=channel, payload=payload)
 
         # --- 6. Print Separator (for readability) ---
         if seq_no > 0 and seq_no % self.log_separator_interval == 0:
@@ -211,8 +216,6 @@ class ReceiverApplication:
         
         # Clear delivered packets list for next connection
         self.delivered_packets.clear()
-        self.packet_arrival_times.clear()
-        self.packet_send_times.clear()
         
         # Explicitly reset all metrics for next connection
         self.api.reset_all_metrics()
@@ -249,58 +252,25 @@ class ReceiverApplication:
 
     # -------------------- Logging Functions --------------------
 
-    def log_packet_arrival(
-        self,
-        seq_no: int,
-        channel: str,
-        timestamp: float,
-        rtt_ms: float,
-        out_of_order: bool,
-    ):
-        """Log packet arrival with detailed information"""
-        status = "[OUT-OF-ORDER]" if out_of_order else ""
+    def log_packet_event(self, event_type: str, seq_no: int, channel: str, **kwargs):
+        """Unified packet event logging for ARRIVAL, DELIVERY, and APP-DATA events"""
         channel_str = "REL" if channel == "RELIABLE" else "UNR"
-        print(
-            f"[ARRIVAL]   "
-            f"SeqNo={seq_no:4d} | "
-            f"Channel={channel_str} | "
-            f"Timestamp={timestamp:.6f}s | "
-            f"RTT={rtt_ms:7.2f}ms "
-            f"{status}"
-        )
-
-    def log_packet_delivery(
-        self,
-        seq_no: int,
-        channel: str,
-        rtt_ms: float,
-        buffering_delay_ms: float,
-        total_delay_ms: float,
-    ):
-        """Log packet delivery to application"""
-        channel_str = "REL" if channel == "RELIABLE" else "UNR"
-        print(
-            f"[DELIVER]   "
-            f"SeqNo={seq_no:4d} | "
-            f"Channel={channel_str} | "
-            f"RTT={rtt_ms:7.2f}ms | "
-            f"BuffDelay={buffering_delay_ms:6.2f}ms | "
-            f"TotalDelay={total_delay_ms:7.2f}ms"
-        )
-
-    def display_packet_data(self, seq_no: int, channel: str, payload: dict):
-        """Display packet payload data (simulates application usage)"""
-        channel_str = "REL" if channel == "RELIABLE" else "UNR"
-        payload_str = json.dumps(payload)
-        if len(payload_str) > 70:
-            payload_str = payload_str[:67] + "..."
-
-        print(
-            f"[APP-DATA]  "
-            f"SeqNo={seq_no:4d} | "
-            f"Channel={channel_str} | "
-            f"Data: {payload_str}"
-        )
+        
+        if event_type == "ARRIVAL":
+            status = "[OUT-OF-ORDER]" if kwargs.get("out_of_order") else ""
+            msg = (f"[ARRIVAL]   SeqNo={seq_no:4d} | Channel={channel_str} | "
+                   f"Timestamp={kwargs['timestamp']:.6f}s | RTT={kwargs['rtt_ms']:7.2f}ms {status}")
+        elif event_type == "DELIVERY":
+            msg = (f"[DELIVER]   SeqNo={seq_no:4d} | Channel={channel_str} | "
+                   f"RTT={kwargs['rtt_ms']:7.2f}ms | BuffDelay={kwargs['buffering_delay_ms']:6.2f}ms | "
+                   f"TotalDelay={kwargs['total_delay_ms']:7.2f}ms")
+        else:  # APP-DATA
+            payload_str = json.dumps(kwargs["payload"])
+            if len(payload_str) > 70:
+                payload_str = payload_str[:67] + "..."
+            msg = f"[APP-DATA]  SeqNo={seq_no:4d} | Channel={channel_str} | Data: {payload_str}"
+        
+        print(msg)
 
     async def stop(self):
         """Stop the receiver gracefully"""
