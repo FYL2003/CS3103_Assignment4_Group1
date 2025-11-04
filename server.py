@@ -14,21 +14,12 @@ Fixes:
 
 import asyncio
 import json
-import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional
 
 from GameNetAPI import GameNetAPI  # Assuming GameNetAPI is in a separate file
-
-# Configure detailed logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s.%(msecs)03d | %(message)s",
-    datefmt="%H:%M:%S",
-)
-logger = logging.getLogger(__name__)
 
 
 # -------------------- Data Classes --------------------
@@ -83,8 +74,6 @@ class ReceiverApplication:
 
         # Control flags
         self.running: bool = False
-        
-        # FIX: Add a flag to prevent redundant stat printing
         self.stats_printed_for_session: bool = False
 
         # Display configuration
@@ -117,10 +106,10 @@ class ReceiverApplication:
         self.api.start_time = time.time()
         self.running = True
 
-        logger.info("Starting H-QUIC receiver server...")
+        print("Starting H-QUIC receiver server...")
         await self.api.start_server()
-        logger.info(f"Server started - Listening on {self.host}:{self.port}\n")
-        logger.info("Waiting for packets from clients...\n")
+        print(f"Server started - Listening on {self.host}:{self.port}\n")
+        print("Waiting for packets from clients...\n")
 
     async def on_message(self, data: dict, reliable: bool, proto: GameNetAPI):
         """
@@ -195,7 +184,7 @@ class ReceiverApplication:
 
         # --- 6. Print Separator (for readability) ---
         if seq_no > 0 and seq_no % self.log_separator_interval == 0:
-            logger.info("  " + "-" * 95)
+            print("  " + "-" * 95)
 
     def _display_and_reset_stats(self):
         """
@@ -207,14 +196,14 @@ class ReceiverApplication:
             return
 
         if not self.delivered_packets:
-            logger.info("No packets were delivered in this session.")
+            print("No packets were delivered in this session.")
             self.api.reset_all_metrics()  # Still reset API state
             return
 
         # --- This is a new session, print stats ---
-        logger.info("=" * 100)
-        logger.info("SESSION STATISTICS")
-        logger.info("=" * 100)
+        print("=" * 100)
+        print("SESSION STATISTICS")
+        print("=" * 100)
         
         # FIX: Set the flag so we don't print them again
         self.stats_printed_for_session = True 
@@ -237,20 +226,20 @@ class ReceiverApplication:
 
     async def on_connection_terminated(self):
         """Callback when client connection is terminated."""
-        logger.info("")
-        logger.info("=" * 100)
-        logger.info("CLIENT CONNECTION TERMINATED")
+        print("")
+        print("=" * 100)
+        print("CLIENT CONNECTION TERMINATED")
         
         self._display_and_reset_stats()  # Display stats and reset
         
         # FIX: RE-ARM THE FLAG for the *next* session
         self.stats_printed_for_session = False
 
-        logger.info("")
-        logger.info("=" * 100)
-        logger.info("Server continues running - waiting for new connections...")
-        logger.info("Press Ctrl+C to stop the server")
-        logger.info("=" * 100)
+        print("")
+        print("=" * 100)
+        print("Server continues running - waiting for new connections...")
+        print("Press Ctrl+C to stop the server")
+        print("=" * 100)
 
     async def receive_loop(self):
         """
@@ -263,10 +252,9 @@ class ReceiverApplication:
                 await asyncio.sleep(1)  # Sleep to prevent high CPU
         except asyncio.CancelledError:
             # This is expected when stop() is called
-            logger.info("\nReceive loop cancelled")
+            print("\nReceive loop cancelled")
 
     # -------------------- Logging Functions --------------------
-    # (These are unchanged, as they are just log formatting)
 
     def log_packet_arrival(
         self,
@@ -279,7 +267,7 @@ class ReceiverApplication:
         """Log packet arrival with detailed information"""
         status = "[OUT-OF-ORDER]" if out_of_order else ""
         channel_str = "REL" if channel == "RELIABLE" else "UNR"
-        logger.info(
+        print(
             f"[ARRIVAL]   "
             f"SeqNo={seq_no:4d} | "
             f"Channel={channel_str} | "
@@ -298,7 +286,7 @@ class ReceiverApplication:
     ):
         """Log packet delivery to application"""
         channel_str = "REL" if channel == "RELIABLE" else "UNR"
-        logger.info(
+        print(
             f"[DELIVER]   "
             f"SeqNo={seq_no:4d} | "
             f"Channel={channel_str} | "
@@ -314,7 +302,7 @@ class ReceiverApplication:
         if len(payload_str) > 70:
             payload_str = payload_str[:67] + "..."
 
-        logger.info(
+        print(
             f"[APP-DATA]  "
             f"SeqNo={seq_no:4d} | "
             f"Channel={channel_str} | "
@@ -327,9 +315,9 @@ class ReceiverApplication:
             return
             
         self.running = False
-        logger.info("\n" + "=" * 100)
-        logger.info("STOPPING RECEIVER APPLICATION")
-        logger.info("=" * 100)
+        print("\n" + "=" * 100)
+        print("STOPPING RECEIVER APPLICATION")
+        print("=" * 100)
 
         # Call the stats helper. If a client was connected,
         # this will print their stats. If stats were already
@@ -340,8 +328,8 @@ class ReceiverApplication:
         await self.api.close()
         await asyncio.sleep(0.1)  # Give tasks a moment to close
 
-        logger.info("Receiver stopped successfully")
-        logger.info("=" * 100 + "\n")
+        print("Receiver stopped successfully")
+        print("=" * 100 + "\n")
 
 
 # -------------------- Main Entry Point --------------------
@@ -367,12 +355,14 @@ async def main():
         await receiver.receive_loop()
 
     except KeyboardInterrupt:
-        logger.info("\n\nInterrupted by user (Ctrl+C). Stopping...")
+        print("\n\nInterrupted by user (Ctrl+C). Stopping...")
     except Exception as e:
-        logger.error(f"\nUncaught error in main: {e}", exc_info=True)
+        print(f"\nUncaught error in main: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
         # This will *always* run, ensuring a clean shutdown
-        logger.info("Shutting down...")
+        print("Shutting down...")
         await receiver.stop()
 
 
