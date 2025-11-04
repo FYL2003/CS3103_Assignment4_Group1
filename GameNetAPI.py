@@ -197,6 +197,16 @@ class GameNetAPI:
         if not self.connected:
             return
         print("Closing QUIC connection...")
+        
+        # Cancel retransmit task if it exists
+        if hasattr(self.conn, 'retransmit_task') and self.conn.retransmit_task:
+            if not self.conn.retransmit_task.done():
+                self.conn.retransmit_task.cancel()
+                try:
+                    await self.conn.retransmit_task
+                except asyncio.CancelledError:
+                    pass
+        
         await self._connect_ctx.__aexit__(None, None, None)
         self.connected = False
         print("Connection closed")

@@ -15,9 +15,16 @@ class PermanentDropClientProtocol(GameClientProtocol):
     def __init__(self, *args, drop_seqs=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.drop_seqs = drop_seqs or []
-        # Disable retransmission for permanently dropped packets
+    
+    async def _disable_retransmit(self):
+        """Disable retransmission after initialization is complete"""
+        await asyncio.sleep(0.01)  # Give time for task to be created
         if self.retransmit_task and not self.retransmit_task.done():
             self.retransmit_task.cancel()
+            try:
+                await self.retransmit_task
+            except asyncio.CancelledError:
+                pass
     
     async def send_packet(self, data: dict, reliable: bool = True):
         """Send a packet, permanently dropping specified sequence numbers"""
@@ -80,6 +87,9 @@ async def test_server_timeout():
     api.conn = await api._connect_ctx.__aenter__()
     api.connected = True
     print("Connected to QUIC server\n")
+    
+    # Disable retransmission for this test
+    await api.conn._disable_retransmit()
 
     # Send test packets
     print("=== Sending 12 reliable packets (skipping 2, 5, 8) ===")
