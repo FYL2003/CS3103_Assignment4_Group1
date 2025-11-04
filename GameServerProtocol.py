@@ -173,7 +173,6 @@ class GameServerProtocol(QuicConnectionProtocol):
             duration = max(time.time() - ch_metrics["start_time"], 1e-6)
             throughput = ch_metrics["bytes_received"] / duration
 
-            #pdr = (ch_metrics["packets_received"] / (ch_metrics["last_proper_seq"] + 1)) * 100
             if channel is RELIABLE:
                 pdr = (ch_metrics["packets_received"] / (self.reliable_seq_largest + 1)) * 100
             else:
@@ -187,7 +186,6 @@ class GameServerProtocol(QuicConnectionProtocol):
                 f"[{name} Metrics] "
                 f"Packets Received: {ch_metrics['packets_received']}, "
                 f"Largest Seen Sequence Number: {self.reliable_seq_largest if channel is RELIABLE else self.unreliable_seq_largest}"
-                #f"Last Proper Sequence Number: {ch_metrics['last_proper_seq']}, "
                 f"Throughput: {throughput:.2f} Bps, "
                 f"PDR: {pdr:.2f}%, "
                 f"Last RTT: {last_rtt} ms, "

@@ -5,13 +5,10 @@ from GameNetAPI import GameNetAPI
 # -------------------- Message Callback --------------------
 async def on_message(data, reliable, proto):
     """
-    Called whenever a packet is delivered from the client.
-    - data: {'seq_no': int, 'timestamp': int, 'payload': dict}
-    - reliable: True if packet is RELIABLE
     - proto: GameServerProtocol instance
     """
-    ### acknowledge receipt by sending back an ACK with next expected seq_no
-    await proto.send_packet({"ACK": data["seq_no"] + 1} | data["payload"], reliable=reliable)
+    # await proto.send_packet({"ACK": data["seq_no"] + 1} | data["payload"], reliable=reliable)
+    pass
 
 # -------------------- Main --------------------
 async def main():
