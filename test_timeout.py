@@ -6,7 +6,7 @@ to test the server's ability to skip them after timeout.
 """
 import asyncio
 import time
-from GameNetAPI import GameNetAPI, GameClientProtocol, RELIABLE, TIMESTAMP_BYTES
+from GameNetAPI import GameNetAPI, GameClientProtocol, RELIABLE, UNRELIABLE, TIMESTAMP_BYTES
 import json
 
 class PermanentDropClientProtocol(GameClientProtocol):
@@ -16,7 +16,8 @@ class PermanentDropClientProtocol(GameClientProtocol):
         super().__init__(*args, **kwargs)
         self.drop_seqs = drop_seqs or []
         # Disable retransmission for permanently dropped packets
-        self.retransmit_task.cancel()
+        if self.retransmit_task and not self.retransmit_task.done():
+            self.retransmit_task.cancel()
     
     async def send_packet(self, data: dict, reliable: bool = True):
         """Send a packet, permanently dropping specified sequence numbers"""
