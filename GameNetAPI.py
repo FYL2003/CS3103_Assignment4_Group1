@@ -7,13 +7,13 @@ from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.events import StreamDataReceived, DatagramFrameReceived
 from aioquic.asyncio.protocol import QuicConnectionProtocol
 
-from GameServerProtocol import GameServerProtocol
+from GameServerProtocol import GameServerProtocol, RETRANSMISSION_TIMEOUT
 
 RELIABLE = 1
 UNRELIABLE = 0
 
-RETRANSMISSION_TIMEOUT = 0.2  # 200 ms default
 TIMESTAMP_BYTES = 8
+RETRANSMIT_CHECK_INTERVAL = 0.05  # Check for retransmissions every 50ms
 
 class GameClientProtocol(QuicConnectionProtocol):
     """Custom protocol for client to receive messages from server"""
@@ -106,7 +106,7 @@ class GameClientProtocol(QuicConnectionProtocol):
         MAX_RETRANSMIT = 3  # Maximum retransmission attempts
         try:
             while True:
-                await asyncio.sleep(0.05)  # Check every 50ms
+                await asyncio.sleep(RETRANSMIT_CHECK_INTERVAL)
                 
                 current_time = time.time()
                 to_retransmit = []

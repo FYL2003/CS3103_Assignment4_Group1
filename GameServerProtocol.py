@@ -12,6 +12,7 @@ RELIABLE = 1
 UNRELIABLE = 0
 TIMESTAMP_BYTES = 8
 RETRANSMISSION_TIMEOUT = 0.2  # 200 ms default
+TIMEOUT_CHECK_INTERVAL = 0.01  # Check for timeouts every 10ms
 
 class GameServerProtocol(QuicConnectionProtocol):
     # -------------------- Initialization --------------------
@@ -139,7 +140,7 @@ class GameServerProtocol(QuicConnectionProtocol):
         """Periodically check for timed-out packets and skip them"""
         try:
             while True:
-                await asyncio.sleep(0.01)  # Check every 10ms
+                await asyncio.sleep(TIMEOUT_CHECK_INTERVAL)
                 
                 current_time = time.time()
                 timed_out_seqs = []

@@ -20,7 +20,7 @@ class PermanentDropClientProtocol(GameClientProtocol):
     
     async def send_packet(self, data: dict, reliable: bool = True):
         """Send a packet, permanently dropping specified sequence numbers"""
-        channel = RELIABLE if reliable else 0
+        channel = RELIABLE if reliable else UNRELIABLE
         seq_no = self.seq[channel]
         
         # Permanently drop specified packets
