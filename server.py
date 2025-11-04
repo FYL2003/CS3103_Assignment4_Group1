@@ -1,13 +1,15 @@
 """
-H-QUIC Receiver Application (Server Mode) - REFACTORED
+H-QUIC Receiver Application (Server Mode) - REFACTORED & FIXED
 
 This server receives packets from game clients using the H-QUIC protocol,
 tracks performance metrics, and displays comprehensive statistics.
 
-Simplifications:
+Fixes:
 - Consolidated all packet processing logic into `on_message`.
 - Centralized exception handling and shutdown logic in `main`.
-- Created a helper for statistics display and state reset.
+- Added a `stats_printed_for_session` flag to ensure stats are
+  printed exactly once on shutdown, regardless of whether
+  Ctrl+C or a client disconnect happens first.
 """
 
 import asyncio
@@ -50,7 +52,7 @@ class ReceiverApplication:
     H-QUIC Receiver Application (SERVER MODE)
 
     Receives packets, processes them, tracks metrics, and logs results.
-    Logic is consolidated for clarity.
+    Logic is consolidated for clarity and robust shutdown.
     """
 
     def __init__(
@@ -81,6 +83,9 @@ class ReceiverApplication:
 
         # Control flags
         self.running: bool = False
+        
+        # FIX: Add a flag to prevent redundant stat printing
+        self.stats_printed_for_session: bool = False
 
         # Display configuration
         self.log_separator_interval: int = 10  # Print separator every N packets
@@ -195,15 +200,24 @@ class ReceiverApplication:
     def _display_and_reset_stats(self):
         """
         Helper function to print statistics and reset session state.
+        This is now "idempotent" - safe to call multiple times.
         """
-        if not self.delivered_packets:
-            logger.info("No packets were delivered in this session.")
-            self.api.reset_all_metrics() # Still reset API state
+        # FIX: If stats were already printed for this session, do nothing.
+        if self.stats_printed_for_session:
             return
 
+        if not self.delivered_packets:
+            logger.info("No packets were delivered in this session.")
+            self.api.reset_all_metrics()  # Still reset API state
+            return
+
+        # --- This is a new session, print stats ---
         logger.info("=" * 100)
         logger.info("SESSION STATISTICS")
         logger.info("=" * 100)
+        
+        # FIX: Set the flag so we don't print them again
+        self.stats_printed_for_session = True 
 
         out_of_order_count = sum(
             1 for p in self.delivered_packets if p.out_of_order
@@ -227,7 +241,10 @@ class ReceiverApplication:
         logger.info("=" * 100)
         logger.info("CLIENT CONNECTION TERMINATED")
         
-        self._display_and_reset_stats() # Display stats and reset
+        self._display_and_reset_stats()  # Display stats and reset
+        
+        # FIX: RE-ARM THE FLAG for the *next* session
+        self.stats_printed_for_session = False
 
         logger.info("")
         logger.info("=" * 100)
@@ -314,10 +331,10 @@ class ReceiverApplication:
         logger.info("STOPPING RECEIVER APPLICATION")
         logger.info("=" * 100)
 
-        # If a client was connected, print its final stats
-        if self.delivered_packets:
-            logger.info("Client was connected. Printing final session stats...")
-            self._display_and_reset_stats()
+        # Call the stats helper. If a client was connected,
+        # this will print their stats. If stats were already
+        # printed by on_connection_terminated, this will do nothing.
+        self._display_and_reset_stats()
 
         # Close API connection
         await self.api.close()
