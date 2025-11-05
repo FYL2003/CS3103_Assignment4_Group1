@@ -1,5 +1,6 @@
 import asyncio
 import json
+import random
 import time
 from collections import deque
 
@@ -13,10 +14,11 @@ def current_millis():
 
 
 class UDPSessionServerProtocol(asyncio.DatagramProtocol):
-    def __init__(self, on_message=None):
+    def __init__(self, on_message=None, drop_rate=0.1):
         self.on_message = on_message
         self.transport = None
         self.peer_addr = None
+        self.drop_rate = drop_rate  # Probability of dropping a packet
         self.seq_received = {RELIABLE: set(), UNRELIABLE: set()}
         self.metrics = {
             RELIABLE: {
@@ -65,14 +67,17 @@ class UDPSessionServerProtocol(asyncio.DatagramProtocol):
         self.metrics[channel]["bytes"] += len(data)
 
         # ACK for reliable packets
-        if channel == RELIABLE:
+        if channel == RELIABLE and self.transport:
             ack_packet = (
                 channel.to_bytes(1, "big")
                 + seq_no.to_bytes(2, "big")
                 + timestamp.to_bytes(8, "big")
                 + b"ACK"
             )
-            self.transport.sendto(ack_packet, addr)
+            try:
+                self.transport.sendto(ack_packet, addr)
+            except Exception as e:
+                print(f"Failed to send ACK: {e}")
 
         # Decode payload
         try:

@@ -28,6 +28,15 @@ class UDPSessionProtocol(asyncio.DatagramProtocol):
         self.pending_reliable = {}  # seq -> (data_bytes, send_time)
         self.retransmit_task = None
 
+        # For in-order delivery
+        self.next_expected_seq = 0
+        self.reorder_buffer = {}  # seq -> data
+        self.delivery_queue = deque()  # ordered packets ready for delivery
+
+        # For sliding window
+        self.window_size = 32
+        self.window_base = 0
+
         # Performance metrics
         self.metrics = {
             RELIABLE: {
@@ -62,10 +71,20 @@ class UDPSessionProtocol(asyncio.DatagramProtocol):
 
     # --------------------- Packet I/O ---------------------
     async def send_packet(self, data: dict, reliable=True):
+        if not self.transport or not self.peer_addr:
+            raise RuntimeError("Transport not ready")
+
         channel = RELIABLE if reliable else UNRELIABLE
         seq_no = self.seq[channel]
+
+        # For reliable packets, enforce window size
+        if reliable:
+            while len(self.pending_reliable) >= self.window_size:
+                await asyncio.sleep(0.001)  # Wait for ACKs
+
         self.seq[channel] = (seq_no + 1) % 65536
 
+        # Prepare packet
         payload = json.dumps(data).encode()
         timestamp = current_millis()
         header = (
@@ -75,12 +94,20 @@ class UDPSessionProtocol(asyncio.DatagramProtocol):
         )
         packet = header + payload
 
-        self.transport.sendto(packet, self.peer_addr)
-        self.metrics[channel]["sent"] += 1
-        self.metrics[channel]["bytes"] += len(packet)
+        # Send packet
+        try:
+            self.transport.sendto(packet, self.peer_addr)
+            self.metrics[channel]["sent"] += 1
+            self.metrics[channel]["bytes"] += len(packet)
 
-        if reliable:
-            self.pending_reliable[seq_no] = (packet, timestamp)
+            if reliable:
+                self.pending_reliable[seq_no] = (packet, timestamp)
+                print(f"Sent reliable packet {seq_no}")
+        except Exception as e:
+            print(f"Failed to send packet: {e}")
+            if reliable:
+                # Restore sequence number on failure
+                self.seq[channel] = seq_no
 
     def datagram_received(self, data, addr):
         asyncio.create_task(self._handle_packet(data, addr))
@@ -100,6 +127,13 @@ class UDPSessionProtocol(asyncio.DatagramProtocol):
                 rtt = current_millis() - send_time
                 self.metrics[channel]["rtts"].append(rtt)
                 self._update_jitter(channel, rtt)
+
+                # Update window
+                if seq_no == self.window_base:
+                    while self.window_base not in self.pending_reliable:
+                        self.window_base = (self.window_base + 1) % 65536
+                        if self.window_base == (self.seq[RELIABLE] % 65536):
+                            break
             return
 
         # normal data received
@@ -111,8 +145,14 @@ class UDPSessionProtocol(asyncio.DatagramProtocol):
         self.metrics[channel]["rtts"].append(rtt_est)
         self._update_jitter(channel, rtt_est)
 
-        # send ACK if reliable
+        try:
+            parsed = json.loads(payload.decode())
+        except Exception:
+            parsed = payload
+
+        # Handle reliable packets with in-order delivery
         if channel == RELIABLE:
+            # Send ACK
             ack_packet = (
                 channel.to_bytes(1, "big")
                 + seq_no.to_bytes(2, "big")
@@ -121,15 +161,36 @@ class UDPSessionProtocol(asyncio.DatagramProtocol):
             )
             self.transport.sendto(ack_packet, addr)
 
-        try:
-            parsed = json.loads(payload.decode())
-        except Exception:
-            parsed = payload
+            # Buffer out-of-order packets
+            if seq_no > self.next_expected_seq:
+                self.reorder_buffer[seq_no] = (parsed, timestamp)
+                return
 
-        if self.on_message:
-            await self.on_message(
-                parsed, channel == RELIABLE, {"seq": seq_no, "timestamp": timestamp}
-            )
+            # Process in-order packet
+            self.delivery_queue.append((parsed, channel == RELIABLE))
+            self.next_expected_seq = seq_no + 1
+
+            # Check if we can deliver more packets from buffer
+            while self.next_expected_seq in self.reorder_buffer:
+                packet_data = self.reorder_buffer.pop(self.next_expected_seq)
+                self.delivery_queue.append((packet_data[0], True))
+                self.next_expected_seq += 1
+
+            # Deliver packets in order
+            while self.delivery_queue:
+                next_packet, is_reliable = self.delivery_queue.popleft()
+                if self.on_message:
+                    await self.on_message(
+                        next_packet,
+                        is_reliable,
+                        {"seq": seq_no, "timestamp": timestamp},
+                    )
+        else:
+            # Unreliable packets delivered immediately
+            if self.on_message:
+                await self.on_message(
+                    parsed, False, {"seq": seq_no, "timestamp": timestamp}
+                )
 
     # --------------------- Retransmission ---------------------
     async def _retransmit_loop(self):
