@@ -14,11 +14,10 @@ def current_millis():
 
 
 class UDPSessionServerProtocol(asyncio.DatagramProtocol):
-    def __init__(self, on_message=None, drop_rate=0.1):
+    def __init__(self, on_message=None):
         self.on_message = on_message
         self.transport = None
         self.peer_addr = None
-        self.drop_rate = drop_rate  # Probability of dropping a packet
         self.seq_received = {RELIABLE: set(), UNRELIABLE: set()}
         self.metrics = {
             RELIABLE: {
@@ -99,7 +98,7 @@ class UDPSessionServerProtocol(asyncio.DatagramProtocol):
             await self.on_message(parsed, channel == RELIABLE, {"seq": seq_no})
 
     async def send_packet(self, data, reliable=True):
-        if not self.peer_addr:
+        if not self.peer_addr or not self.transport:
             return
         channel = RELIABLE if reliable else UNRELIABLE
         seq_no = int(time.time() * 1000) % 65536
@@ -111,6 +110,8 @@ class UDPSessionServerProtocol(asyncio.DatagramProtocol):
             + timestamp.to_bytes(8, "big")
             + payload
         )
+
+        # Send and count stats
         self.transport.sendto(packet, self.peer_addr)
         self.metrics[channel]["sent"] += 1
         self.metrics[channel]["bytes"] += len(packet)
@@ -149,12 +150,30 @@ async def main():
         factory, local_addr=("127.0.0.1", 9999)
     )
 
+    last_sent = {RELIABLE: 0, UNRELIABLE: 0}
+    last_received = {RELIABLE: 0, UNRELIABLE: 0}
+
     try:
         while True:
-            await asyncio.sleep(10)
-            proto.report_metrics()
+            await asyncio.sleep(30)  # Report every 30 seconds
+
+            # Only report if there's new activity
+            current_sent = {
+                ch: proto.metrics[ch]["sent"] for ch in (RELIABLE, UNRELIABLE)
+            }
+            current_received = {
+                ch: proto.metrics[ch]["received"] for ch in (RELIABLE, UNRELIABLE)
+            }
+
+            if current_sent != last_sent or current_received != last_received:
+                proto.report_metrics()
+                last_sent = current_sent.copy()
+                last_received = current_received.copy()
+
     except KeyboardInterrupt:
         print("\n[SERVER] Shutting down...")
+        # Print final metrics
+        proto.report_metrics()
     finally:
         transport.close()
 
