@@ -37,6 +37,8 @@ class GameServerProtocol(QuicConnectionProtocol):
         self.reliable_seq_largest = 0
         self.unreliable_seq_largest = 0
         self.reliable_wait_start_time = None # Timer for skipping lost packets
+        self.stream_buffers = {}            # stream_id -> [list_of_chunks]
+        
         # Metrics
         self.metrics = {
              RELIABLE: self._create_channel_metrics(),
@@ -46,12 +48,22 @@ class GameServerProtocol(QuicConnectionProtocol):
     # -------------------- Event Handling --------------------
     def quic_event_received(self, event):
         if isinstance(event, StreamDataReceived):
-            asyncio.create_task(self._handle_packet(event.data, reliable=True))
+            
+            # Buffer if not full chunk
+            if event.stream_id not in self.stream_buffers:
+                # If part not in buffer yet, create new list
+                self.stream_buffers[event.stream_id] = []
+                
+            self.stream_buffers[event.stream_id].append(event.data)
+            
             if event.end_stream:
-                try:
-                    self._quic.reset_stream(event.stream_id, 0)
-                except Exception:
-                    pass
+                # We have the full packet, join the chunks and handle it
+                full_packet = b"".join(self.stream_buffers[event.stream_id])
+                asyncio.create_task(self._handle_packet(full_packet, reliable=True))
+                
+                # Clean up
+                del self.stream_buffers[event.stream_id]
+   
         elif isinstance(event, DatagramFrameReceived):
             asyncio.create_task(self._handle_packet(event.data, reliable=False))
         elif isinstance(event, ConnectionTerminated):
