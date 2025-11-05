@@ -13,6 +13,19 @@ UNRELIABLE = 0
 TIMESTAMP_BYTES = 8
 
 class GameServerProtocol(QuicConnectionProtocol):
+    
+    def _create_channel_metrics(self):
+        """Helper factory to create a clean metrics dictionary."""
+        return {
+            "packets_received": 0,
+            "last_proper_seq": 0,
+            "last_rtt": None,
+            "rtt_samples": [],
+            "jitter_samples": [],
+            "bytes_received": 0,
+            "start_time": None,
+        }
+    
     # -------------------- Initialization --------------------
     def __init__(self, *args, on_message=None, **kwargs):
         super().__init__(*args, **kwargs)
@@ -24,24 +37,8 @@ class GameServerProtocol(QuicConnectionProtocol):
         self.unreliable_seq_largest = 0
         # Metrics
         self.metrics = {
-            RELIABLE: {
-                "packets_received": 0,
-                "last_proper_seq": 0,
-                "last_rtt": None,
-                "rtt_samples": [],
-                "jitter_samples": [],
-                "bytes_received": 0,
-                "start_time": None,
-            },
-            UNRELIABLE: {
-                "packets_received": 0,
-                "last_proper_seq": 0,
-                "last_rtt": None,
-                "rtt_samples": [],
-                "jitter_samples": [],
-                "bytes_received": 0,
-                "start_time": None,
-            },
+             RELIABLE: self._create_channel_metrics(),
+            UNRELIABLE: self._create_channel_metrics(),
         }
 
     # -------------------- Event Handling --------------------
