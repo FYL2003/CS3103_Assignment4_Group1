@@ -92,9 +92,7 @@ class GameServerProtocol(QuicConnectionProtocol):
 
     async def _deliver_packet(self, data, reliable, seq_no, timestamp):
         rtt = int(time.time() * 1000) - timestamp
-        print(f"{'[RELIABLE]' if reliable else '[UNRELIABLE]'} "
-              f"Seq {seq_no} | Timestamp {timestamp} | RTT {rtt} ms | Data: {data}")
-
+        
         self.metrics[RELIABLE if reliable else UNRELIABLE]["last_rtt"] = rtt
 
         # update only if seq_no is higher than previous highest, may be out of order
@@ -106,6 +104,7 @@ class GameServerProtocol(QuicConnectionProtocol):
                 "seq_no": seq_no,
                 "timestamp": timestamp,
                 "payload": data,
+                "rtt": rtt
             }
             try:
                 await self.on_message(formatted_data, reliable, self)

@@ -2,6 +2,17 @@
 import asyncio
 from GameNetAPI import GameNetAPI
 
+# -------------------- Message Callback --------------------
+async def on_message(data: dict, reliable: bool, proto):
+    """
+    This is the RECEIVER APPLICATION logic.
+    It prints the data as required by the assignment[cite: 45, 46].
+    """
+    channel_type = '[RELIABLE]' if reliable else '[UNRELIABLE]'
+    print(f"{channel_type} "
+          f"Seq {data['seq_no']} | Timestamp {data['timestamp']} | "
+          f"RTT {data['rtt']} ms | Data: {data['payload']}")
+
 # -------------------- Main --------------------
 async def main():
     api = GameNetAPI(
@@ -11,6 +22,9 @@ async def main():
         certfile="cert.pem",
         keyfile="key.pem",
     )
+
+    # Register the application's callback
+    api.set_message_callback(on_message)
 
     # Track connected server protocols
     api.server_protocols = []
