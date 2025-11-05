@@ -26,16 +26,15 @@ async def send_data(api):
         await api.send(data, reliable=reliable)
         await asyncio.sleep(0.05)
 
+async def handle_message(data, reliable):
+    """Callback for received messages from server"""
+    print(f"[SERVER -> CLIENT] {data} (reliable={reliable})")
+
 async def main():
     api = GameNetAPI()
-
-    async def handle_message(data, reliable):
-        """Callback for received messages from server"""
-        print(f"[SERVER -> CLIENT] {data} (reliable={reliable})")
-
     api.set_message_callback(handle_message)
-    await api.connect()
 
+    await api.connect()
     await send_data(api)
 
     await api.close()
@@ -43,4 +42,7 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print(f"\nClient stopped by user")
