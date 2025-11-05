@@ -2,12 +2,18 @@
 AY25/26 Sem1 CS3103 group project
 
 
-Dependencies:
+## Dependencies:
 `aioquic`
 
 To install dependencies, run `pip install -r requirements.txt`.  
 
-As aioquic requires a TLS certificate for server mode, generate a self-signed certificate in the project"
-example command: 
-openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem -days 365 -subj "/CN=localhost"
+## SSL Certificates (Automatic)
+The server requires SSL certificates (`cert.pem`, `key.pem`) to run QUIC.
+
+Our code automatically generates these files for you the first time you run the server using generate_cert.py.
+
+> Note: If you wish to use your own custom certificates, simply replace the auto-generated `cert.pem` and `key.pem` files in the root directory.
+
+## Running the server
+
 
