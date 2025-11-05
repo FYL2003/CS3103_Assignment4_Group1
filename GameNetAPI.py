@@ -12,8 +12,6 @@ from generate_cert import ensure_certificates
 
 RELIABLE = 1
 UNRELIABLE = 0
-
-RETRANSMISSION_TIMEOUT = 0.2  # 200 ms default
 TIMESTAMP_BYTES = 8
 
 class GameClientProtocol(QuicConnectionProtocol):

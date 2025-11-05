@@ -11,6 +11,7 @@ from aioquic.quic.events import (
 RELIABLE = 1
 UNRELIABLE = 0
 TIMESTAMP_BYTES = 8
+BUFFERING_TIMEOUT = 0.2  # 200 ms default for skipping lost packets
 
 class GameServerProtocol(QuicConnectionProtocol):
     
@@ -35,6 +36,7 @@ class GameServerProtocol(QuicConnectionProtocol):
         self.on_message = on_message        # callback for received messages
         self.reliable_seq_largest = 0
         self.unreliable_seq_largest = 0
+        self.reliable_wait_start_time = None # Timer for skipping lost packets
         # Metrics
         self.metrics = {
              RELIABLE: self._create_channel_metrics(),
@@ -85,10 +87,38 @@ class GameServerProtocol(QuicConnectionProtocol):
             self._update_metrics(channel, len(packet), timestamp)
 
     async def _deliver_reliable(self):
+        # (1) Deliver all currently available in-order packets
         while self.expected_seq in self.reliable_buffer:
+            # We have the packet we're looking for, deliver it.
             data, ts = self.reliable_buffer.pop(self.expected_seq)
             await self._deliver_packet(data, reliable=True, seq_no=self.expected_seq, timestamp=ts)
+            
             self.expected_seq += 1
+            self.reliable_wait_start_time = None # We made progress, reset any timer
+
+        # (2) If we're still missing a packet, check for a timeout
+        
+        # A "gap" is detected if we don't have the expected packet, 
+        # but we *do* have a packet with a higher sequence number.
+        if self.expected_seq not in self.reliable_buffer and self.expected_seq <= self.reliable_seq_largest:
+            
+            if self.reliable_wait_start_time is None:
+                # This is the first time we've noticed this gap. Start the timer.
+                self.reliable_wait_start_time = time.time()
+            
+            # Check if the timer has expired
+            elif (time.time() - self.reliable_wait_start_time) > BUFFERING_TIMEOUT:
+                # 200ms timer expired! Skip the missing packet
+                print(f"[RELIABLE TIMEOUT] Skipping packet {self.expected_seq} (lost).")
+                
+                # The "skip" is just incrementing the expected sequence number
+                self.expected_seq += 1
+                self.reliable_wait_start_time = None # Reset timer for the next gap
+
+                # IMPORTANT: After skipping, call this function again.
+                # This will unblock any buffered packets
+                # that were waiting for the lost one.
+                await self._deliver_reliable()
 
     async def _deliver_packet(self, data, reliable, seq_no, timestamp):
         rtt = int(time.time() * 1000) - timestamp
