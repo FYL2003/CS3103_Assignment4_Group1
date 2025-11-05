@@ -183,11 +183,12 @@ class GameServerProtocol(QuicConnectionProtocol):
             avg_jitter = sum(ch_metrics["jitter_samples"]) / len(ch_metrics["jitter_samples"]) if ch_metrics["jitter_samples"] else 0
 
             print(
-                f"[{name} Metrics] "
-                f"Packets Received: {ch_metrics['packets_received']}, "
-                f"Largest Seen Sequence Number: {self.reliable_seq_largest if channel is RELIABLE else self.unreliable_seq_largest}"
-                f"Throughput: {throughput:.2f} Bps, "
-                f"PDR: {pdr:.2f}%, "
-                f"Last RTT: {last_rtt} ms, "
-                f"Avg Jitter: {avg_jitter:.2f} ms"
+                f"--- [{name} Metrics] ---\n"
+                f"  Packets Received: {ch_metrics['packets_received']}\n"
+                f"  Largest Seq Num:  {self.reliable_seq_largest if channel is RELIABLE else self.unreliable_seq_largest}\n"
+                f"  Throughput:       {throughput:.2f} Bps\n"
+                f"  PDR:              {pdr:.2f}%\n"
+                f"  Last RTT:         {last_rtt} ms\n"
+                f"  Avg Jitter:       {avg_jitter:.2f} ms\n"
+                f"-------------------------"
             )
