@@ -97,14 +97,6 @@ class GameServerProtocol(QuicConnectionProtocol):
 
         self.metrics[RELIABLE if reliable else UNRELIABLE]["last_rtt"] = rtt
 
-        # Send an ACK back to the client
-        # We create a task so we don't block the delivery pipeline
-        response_payload = {
-            "ack": "received",
-            "seq_echo": seq_no
-        }
-        asyncio.create_task(self.send_packet(response_payload, reliable=reliable))
-
         # update only if seq_no is higher than previous highest, may be out of order
         self.metrics[RELIABLE]["last_proper_seq"] = max(self.metrics[RELIABLE]["last_proper_seq"], seq_no)
         self.metrics[UNRELIABLE]["last_proper_seq"] = max(self.metrics[UNRELIABLE]["last_proper_seq"], seq_no)

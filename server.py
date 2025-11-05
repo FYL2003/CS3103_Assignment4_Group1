@@ -2,14 +2,6 @@
 import asyncio
 from GameNetAPI import GameNetAPI
 
-# -------------------- Message Callback --------------------
-async def on_message(data, reliable, proto):
-    """
-    - proto: GameServerProtocol instance
-    """
-    # await proto.send_packet({"ACK": data["seq_no"] + 1} | data["payload"], reliable=reliable)
-    pass
-
 # -------------------- Main --------------------
 async def main():
     api = GameNetAPI(
@@ -19,8 +11,6 @@ async def main():
         certfile="cert.pem",
         keyfile="key.pem",
     )
-
-    api.set_message_callback(on_message)
 
     # Track connected server protocols
     api.server_protocols = []
