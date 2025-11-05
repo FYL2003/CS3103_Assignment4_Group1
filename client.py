@@ -1,6 +1,8 @@
 import asyncio
 import random
+
 from GameNetAPI import GameNetAPI
+
 
 def generate_game_data():
     """Generate random game data packet for testing."""
@@ -14,8 +16,9 @@ def generate_game_data():
         "pos_x": pos_x,
         "pos_y": pos_y,
         "dir": direction,
-        "location": location
+        "location": location,
     }
+
 
 async def send_data(api):
     """Send 100 game data packets to the server."""
@@ -25,6 +28,7 @@ async def send_data(api):
         data = generate_game_data()
         await api.send(data, reliable=reliable)
         await asyncio.sleep(0.05)
+
 
 async def main():
     api = GameNetAPI()
