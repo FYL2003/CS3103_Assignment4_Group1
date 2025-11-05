@@ -150,33 +150,20 @@ async def main():
         factory, local_addr=("127.0.0.1", 9999)
     )
 
-    last_sent = {RELIABLE: 0, UNRELIABLE: 0}
-    last_received = {RELIABLE: 0, UNRELIABLE: 0}
-
     try:
-        while True:
-            await asyncio.sleep(30)  # Report every 30 seconds
-
-            # Only report if there's new activity
-            current_sent = {
-                ch: proto.metrics[ch]["sent"] for ch in (RELIABLE, UNRELIABLE)
-            }
-            current_received = {
-                ch: proto.metrics[ch]["received"] for ch in (RELIABLE, UNRELIABLE)
-            }
-
-            if current_sent != last_sent or current_received != last_received:
-                proto.report_metrics()
-                last_sent = current_sent.copy()
-                last_received = current_received.copy()
-
+        # Server runs forever until interrupted
+        await asyncio.Event().wait()
     except KeyboardInterrupt:
         print("\n[SERVER] Shutting down...")
-        # Print final metrics
-        proto.report_metrics()
     finally:
+        # Print final metrics before closing
+        proto.report_metrics()
         transport.close()
+        return proto  # Return proto so main can access it
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass  # Clean exit on Ctrl+C
