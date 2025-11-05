@@ -209,7 +209,7 @@ class GameServerProtocol(QuicConnectionProtocol):
                 pdr = (ch_metrics["packets_received"] / (self.unreliable_seq_largest + 1)) * 100
 
 
-            last_rtt = ch_metrics["last_rtt"]
+            avg_rtt = sum(ch_metrics["rtt_samples"]) / len(ch_metrics["rtt_samples"]) if ch_metrics["rtt_samples"] else 0
             avg_jitter = sum(ch_metrics["jitter_samples"]) / len(ch_metrics["jitter_samples"]) if ch_metrics["jitter_samples"] else 0
 
             print(
@@ -218,7 +218,7 @@ class GameServerProtocol(QuicConnectionProtocol):
                 f"  Largest Seq Num:  {self.reliable_seq_largest if channel is RELIABLE else self.unreliable_seq_largest}\n"
                 f"  Throughput:       {throughput:.2f} Bps\n"
                 f"  PDR:              {pdr:.2f}%\n"
-                f"  Last RTT:         {last_rtt} ms\n"
+                f"  Avg RTT:         {avg_rtt} ms\n"
                 f"  Avg Jitter:       {avg_jitter:.2f} ms\n"
                 f"-------------------------"
             )
