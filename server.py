@@ -1,6 +1,8 @@
 # server.py
 import asyncio
+
 from GameNetAPI import GameNetAPI
+
 
 # -------------------- Message Callback --------------------
 async def on_message(data: dict, reliable: bool, proto):
@@ -8,10 +10,13 @@ async def on_message(data: dict, reliable: bool, proto):
     This is the RECEIVER APPLICATION logic.
     It prints the data as required by the assignment[cite: 45, 46].
     """
-    channel_type = '[RELIABLE]' if reliable else '[UNRELIABLE]'
-    print(f"{channel_type} "
-          f"Seq {data['seq_no']} | Timestamp {data['timestamp']} | "
-          f"RTT {data['rtt']} ms | Data: {data['payload']}")
+    channel_type = "[RELIABLE]" if reliable else "[UNRELIABLE]"
+    print(
+        f"{channel_type} "
+        f"Seq {data['seq_no']} | Timestamp {data['timestamp']} | "
+        f"latency {data['latency']} ms | Data: {data['payload']}"
+    )
+
 
 # -------------------- Main --------------------
 async def main():
@@ -32,6 +37,7 @@ async def main():
     # Wrapper to track protocols automatically
     def protocol_wrapper(*args, **kwargs):
         from GameServerProtocol import GameServerProtocol
+
         proto = GameServerProtocol(*args, on_message=api.on_message, **kwargs)
         api.server_protocols.append(proto)
         return proto
@@ -47,6 +53,7 @@ async def main():
             for proto in api.server_protocols:
                 proto.print_statistics()
         await api.close()
+
 
 # -------------------- Entry Point --------------------
 if __name__ == "__main__":

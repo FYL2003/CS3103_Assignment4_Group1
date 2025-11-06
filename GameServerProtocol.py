@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+
 from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.quic.events import (
     ConnectionTerminated,
@@ -13,57 +14,58 @@ UNRELIABLE = 0
 TIMESTAMP_BYTES = 8
 BUFFERING_TIMEOUT = 0.2  # 200 ms default for skipping lost packets
 
+
 class GameServerProtocol(QuicConnectionProtocol):
-    
+
     def _create_channel_metrics(self):
         """Helper factory to create a clean metrics dictionary."""
         return {
             "packets_received": 0,
             "last_proper_seq": 0,
-            "last_rtt": None,
-            "rtt_samples": [],
+            "last_latency": None,
+            "latency_samples": [],
             "jitter_samples": [],
             "bytes_received": 0,
             "start_time": None,
         }
-    
+
     # -------------------- Initialization --------------------
     def __init__(self, *args, on_message=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.reliable_buffer = {}           # seq_no -> packet
-        self.expected_seq = 0               # next expected reliable seq
-        self.next_ack_seq = 0               # seq for server -> client packets
-        self.on_message = on_message        # callback for received messages
+        self.reliable_buffer = {}  # seq_no -> packet
+        self.expected_seq = 0  # next expected reliable seq
+        self.next_ack_seq = 0  # seq for server -> client packets
+        self.on_message = on_message  # callback for received messages
         self.reliable_seq_largest = 0
         self.unreliable_seq_largest = 0
-        self.reliable_wait_start_time = None # Timer for skipping lost packets
-        self.stream_buffers = {}            # stream_id -> [list_of_chunks]
-        
+        self.reliable_wait_start_time = None  # Timer for skipping lost packets
+        self.stream_buffers = {}  # stream_id -> [list_of_chunks]
+
         # Metrics
         self.metrics = {
-             RELIABLE: self._create_channel_metrics(),
+            RELIABLE: self._create_channel_metrics(),
             UNRELIABLE: self._create_channel_metrics(),
         }
 
     # -------------------- Event Handling --------------------
     def quic_event_received(self, event):
         if isinstance(event, StreamDataReceived):
-            
+
             # Buffer if not full chunk
             if event.stream_id not in self.stream_buffers:
                 # If part not in buffer yet, create new list
                 self.stream_buffers[event.stream_id] = []
-                
+
             self.stream_buffers[event.stream_id].append(event.data)
-            
+
             if event.end_stream:
                 # We have the full packet, join the chunks and handle it
                 full_packet = b"".join(self.stream_buffers[event.stream_id])
                 asyncio.create_task(self._handle_packet(full_packet, reliable=True))
-                
+
                 # Clean up
                 del self.stream_buffers[event.stream_id]
-   
+
         elif isinstance(event, DatagramFrameReceived):
             asyncio.create_task(self._handle_packet(event.data, reliable=False))
         elif isinstance(event, ConnectionTerminated):
@@ -78,8 +80,8 @@ class GameServerProtocol(QuicConnectionProtocol):
 
         channel = packet[0]
         seq_no = int.from_bytes(packet[1:3], "big")
-        timestamp = int.from_bytes(packet[3:3 + TIMESTAMP_BYTES], "big")
-        payload_bytes = packet[3 + TIMESTAMP_BYTES:]
+        timestamp = int.from_bytes(packet[3 : 3 + TIMESTAMP_BYTES], "big")
+        payload_bytes = packet[3 + TIMESTAMP_BYTES :]
 
         try:
             data = json.loads(payload_bytes.decode())
@@ -95,7 +97,9 @@ class GameServerProtocol(QuicConnectionProtocol):
             self._update_metrics(channel, len(packet), timestamp)
         else:
             self.unreliable_seq_largest = max(self.unreliable_seq_largest, seq_no)
-            await self._deliver_packet(data, reliable=False, seq_no=seq_no, timestamp=timestamp)
+            await self._deliver_packet(
+                data, reliable=False, seq_no=seq_no, timestamp=timestamp
+            )
             self._update_metrics(channel, len(packet), timestamp)
 
     async def _deliver_reliable(self):
@@ -103,29 +107,34 @@ class GameServerProtocol(QuicConnectionProtocol):
         while self.expected_seq in self.reliable_buffer:
             # We have the packet we're looking for, deliver it.
             data, ts = self.reliable_buffer.pop(self.expected_seq)
-            await self._deliver_packet(data, reliable=True, seq_no=self.expected_seq, timestamp=ts)
-            
+            await self._deliver_packet(
+                data, reliable=True, seq_no=self.expected_seq, timestamp=ts
+            )
+
             self.expected_seq += 1
-            self.reliable_wait_start_time = None # We made progress, reset any timer
+            self.reliable_wait_start_time = None  # We made progress, reset any timer
 
         # (2) If we're still missing a packet, check for a timeout
-        
-        # A "gap" is detected if we don't have the expected packet, 
+
+        # A "gap" is detected if we don't have the expected packet,
         # but we *do* have a packet with a higher sequence number.
-        if self.expected_seq not in self.reliable_buffer and self.expected_seq <= self.reliable_seq_largest:
-            
+        if (
+            self.expected_seq not in self.reliable_buffer
+            and self.expected_seq <= self.reliable_seq_largest
+        ):
+
             if self.reliable_wait_start_time is None:
                 # This is the first time we've noticed this gap. Start the timer.
                 self.reliable_wait_start_time = time.time()
-            
+
             # Check if the timer has expired
             elif (time.time() - self.reliable_wait_start_time) > BUFFERING_TIMEOUT:
                 # 200ms timer expired! Skip the missing packet
                 print(f"[RELIABLE TIMEOUT] Skipping packet {self.expected_seq} (lost).")
-                
+
                 # The "skip" is just incrementing the expected sequence number
                 self.expected_seq += 1
-                self.reliable_wait_start_time = None # Reset timer for the next gap
+                self.reliable_wait_start_time = None  # Reset timer for the next gap
 
                 # IMPORTANT: After skipping, call this function again.
                 # This will unblock any buffered packets
@@ -133,20 +142,24 @@ class GameServerProtocol(QuicConnectionProtocol):
                 await self._deliver_reliable()
 
     async def _deliver_packet(self, data, reliable, seq_no, timestamp):
-        rtt = int(time.time() * 1000) - timestamp
-        
-        self.metrics[RELIABLE if reliable else UNRELIABLE]["last_rtt"] = rtt
+        latency = int(time.time() * 1000) - timestamp
+
+        self.metrics[RELIABLE if reliable else UNRELIABLE]["last_latency"] = latency
 
         # update only if seq_no is higher than previous highest, may be out of order
-        self.metrics[RELIABLE]["last_proper_seq"] = max(self.metrics[RELIABLE]["last_proper_seq"], seq_no)
-        self.metrics[UNRELIABLE]["last_proper_seq"] = max(self.metrics[UNRELIABLE]["last_proper_seq"], seq_no)
+        self.metrics[RELIABLE]["last_proper_seq"] = max(
+            self.metrics[RELIABLE]["last_proper_seq"], seq_no
+        )
+        self.metrics[UNRELIABLE]["last_proper_seq"] = max(
+            self.metrics[UNRELIABLE]["last_proper_seq"], seq_no
+        )
 
         if self.on_message:
             formatted_data = {
                 "seq_no": seq_no,
                 "timestamp": timestamp,
                 "payload": data,
-                "rtt": rtt
+                "latency": latency,
             }
             try:
                 await self.on_message(formatted_data, reliable, self)
@@ -184,11 +197,11 @@ class GameServerProtocol(QuicConnectionProtocol):
         ch_metrics["bytes_received"] += packet_size
 
         # Jitter calculation
-        last_rtt = ch_metrics["last_rtt"]
-        rtt = int(time.time() * 1000) - timestamp
-        ch_metrics["rtt_samples"].append(rtt)
-        if last_rtt is not None:
-            ch_metrics["jitter_samples"].append(abs(rtt - last_rtt))
+        last_latency = ch_metrics["last_latency"]
+        latency = int(time.time() * 1000) - timestamp
+        ch_metrics["latency_samples"].append(latency)
+        if last_latency is not None:
+            ch_metrics["jitter_samples"].append(abs(latency - last_latency))
 
     def print_statistics(self):
 
@@ -204,13 +217,24 @@ class GameServerProtocol(QuicConnectionProtocol):
             throughput = ch_metrics["bytes_received"] / duration
 
             if channel is RELIABLE:
-                pdr = (ch_metrics["packets_received"] / (self.reliable_seq_largest + 1)) * 100
+                pdr = (
+                    ch_metrics["packets_received"] / (self.reliable_seq_largest + 1)
+                ) * 100
             else:
-                pdr = (ch_metrics["packets_received"] / (self.unreliable_seq_largest + 1)) * 100
+                pdr = (
+                    ch_metrics["packets_received"] / (self.unreliable_seq_largest + 1)
+                ) * 100
 
-
-            avg_rtt = sum(ch_metrics["rtt_samples"]) / len(ch_metrics["rtt_samples"]) if ch_metrics["rtt_samples"] else 0
-            avg_jitter = sum(ch_metrics["jitter_samples"]) / len(ch_metrics["jitter_samples"]) if ch_metrics["jitter_samples"] else 0
+            avg_latency = (
+                sum(ch_metrics["latency_samples"]) / len(ch_metrics["latency_samples"])
+                if ch_metrics["latency_samples"]
+                else 0
+            )
+            avg_jitter = (
+                sum(ch_metrics["jitter_samples"]) / len(ch_metrics["jitter_samples"])
+                if ch_metrics["jitter_samples"]
+                else 0
+            )
 
             print(
                 f"--- [{name} Metrics] ---\n"
@@ -218,7 +242,7 @@ class GameServerProtocol(QuicConnectionProtocol):
                 f"  Largest Seq Num:  {self.reliable_seq_largest if channel is RELIABLE else self.unreliable_seq_largest}\n"
                 f"  Throughput:       {throughput:.2f} Bps\n"
                 f"  PDR:              {pdr:.2f}%\n"
-                f"  Avg RTT:         {avg_rtt} ms\n"
+                f"  Avg Latency:         {avg_latency} ms\n"
                 f"  Avg Jitter:       {avg_jitter:.2f} ms\n"
                 f"-------------------------"
             )
