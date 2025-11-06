@@ -26,12 +26,12 @@ Open a second terminal and run the client:
 ```bash
 python client.py 
 ```
-The client will connect, send 100 reliable and unreliable packets to the server, and then disconnect. You will see the server's output in its terminal window as it receives packets.
+The client will connect, send a total of 100 reliable and unreliable packets randomly to the server, and then disconnect. You will see the server's output in its terminal window as it receives packets.
 
 ## Stop Server and View Statistics
 To stop the server, go to its terminal window and press `Ctrl+C`.
 
-Upon stopping, the server will automatically print the final performance statistics (Throughput, PDR, Jitter, etc.) for both reliable and unreliable channels.
+Upon stopping, the server will automatically print the final performance statistics (Throughput, PDR, Jitter, etc.) for reliable and unreliable channels separately.
 
 ## Network Simulator
 To simulate packet losses in a network we used `tc-netem`. Refer to the enclosed video for the sample run. 
